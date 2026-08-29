@@ -4,6 +4,7 @@ import json
 import re
 import sqlite3
 from pathlib import Path
+from dataclasses import dataclass, field
 
 
 TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
@@ -32,13 +33,34 @@ def _terms(text: str) -> list[str]:
     ]
 
 
-class Agent:
-    """Editable weak baseline: stateless BM25 retrieval with no LLM dependency."""
+# Class to store states for each session/user
+@dataclass
+class SessionState:
+    user_profile: dict
+    history: list[dict] = field(default_factory=list)
 
+    # Attribute slots
+    slots: dict = field(default_factory=lambda: {
+        "category": None,
+        "material": None,
+        "color": None, 
+        "size": None, 
+        "style": None, 
+        "brand": None, 
+        "budget": None, 
+        "feature": None, 
+        "use_case": None
+    })
+
+    # Attributes slots where users said they had no preference
+    no_preference: set[str] = field(default_factory=set)
+
+
+class Agent:
     def __init__(self, catalog_path: str | Path = "data/catalog.jsonl") -> None:
         self.catalog_path = Path(catalog_path)
         self.connection = sqlite3.connect(":memory:")
-        self._sessions: set[str] = set()
+        self._sessions: dict[str, SessionState] = {}
         self._build_index()
 
     def _build_index(self) -> None:
@@ -71,8 +93,27 @@ class Agent:
         self.connection.commit()
 
     def reset(self, session_id: str, user_profile: dict) -> None:
-        # The profile is anonymized and may be used for personalization.
-        self._sessions.add(session_id)
+        # Stores anonymized user profile information in current session state
+        self._sessions[session_id] = SessionState(
+            user_profile=user_profile
+        )
+
+    def extract_slots(text: str) -> dict:
+        """
+        Returns a dict of the extracted attributes slots
+        {
+        "category": None,
+        "material": None,
+        "color": None, 
+        "size": None, 
+        "style": None, 
+        "brand": None, 
+        "budget": None, 
+        "feature": None, 
+        "use_case": None
+        }
+        """
+        pass
 
     def respond(
         self,
@@ -81,22 +122,38 @@ class Agent:
         turn: int,
         top_k: int,
     ) -> dict:
+        
         if session_id not in self._sessions:
             raise RuntimeError("reset must be called before respond")
-        unique_terms = list(dict.fromkeys(_terms(user_message)))[:40]
-        expression = " OR ".join(f'"{term}"' for term in unique_terms)
-        if not expression:
-            recommendations: list[dict] = []
-        else:
-            rows = self.connection.execute(
-                "SELECT parent_asin FROM products WHERE products MATCH ? "
-                "ORDER BY bm25(products, 0.0, 6.0, 4.0, 2.5, 2.5, 1.5, 1.0) LIMIT ?",
-                (expression, top_k),
-            ).fetchall()
-            recommendations = [{"parent_asin": str(row[0])} for row in rows]
-        return {
-            "message": "Here are the closest matches I found.",
-            "ask_attribute": None,
-            "recommendations": recommendations,
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0},
-        }
+
+        state = self._sessions[session_id] # Get current session state
+
+        # Store current turn and message into current session state's history
+        state.history.append({
+            "turn": turn,
+            "user_message": user_message
+        })
+
+        new_slots = self.extract_slots(user_message) # Extract new slots from user message
+
+        # Update current session state slots
+        for attribute, val in new_slots.items():
+            state.slots[attribute] = val
+        
+        # unique_terms = list(dict.fromkeys(_terms(user_message)))[:40]
+        # expression = " OR ".join(f'"{term}"' for term in unique_terms)
+        # if not expression:
+        #     recommendations: list[dict] = []
+        # else:
+        #     rows = self.connection.execute(
+        #         "SELECT parent_asin FROM products WHERE products MATCH ? "
+        #         "ORDER BY bm25(products, 0.0, 6.0, 4.0, 2.5, 2.5, 1.5, 1.0) LIMIT ?",
+        #         (expression, top_k),
+        #     ).fetchall()
+        #     recommendations = [{"parent_asin": str(row[0])} for row in rows]
+        # return {
+        #     "message": "Here are the closest matches I found.",
+        #     "ask_attribute": None,
+        #     "recommendations": recommendations,
+        #     "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+        # }
