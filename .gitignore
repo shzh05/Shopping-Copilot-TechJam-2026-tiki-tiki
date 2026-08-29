@@ -1,0 +1,4 @@
+data/catalog.jsonl
+.env
+.venv
+test.py
