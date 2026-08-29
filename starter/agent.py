@@ -5,8 +5,8 @@ import re
 import sqlite3
 from pathlib import Path
 
-from session_state import SessionState
-from state_tracker import track
+from starter.session_state import SessionState
+from starter.state_tracker import track
 
 
 TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
@@ -36,13 +36,12 @@ def _terms(text: str) -> list[str]:
 
 
 class Agent:
-    """Conversational shopping agent: Groq slot tracker plus BM25 retrieval."""
-
     def __init__(self, catalog_path: str | Path = "data/catalog.jsonl") -> None:
         self.catalog_path = Path(catalog_path)
         self.connection = sqlite3.connect(":memory:")
         self._sessions: dict[str, SessionState] = {}
         self._prices: dict[str, float | None] = {}
+        self._products: dict[str, dict] = {}
         self._build_index()
 
     def _build_index(self) -> None:
@@ -57,6 +56,7 @@ class Agent:
             for line in handle:
                 product = json.loads(line)
                 parent_asin = str(product["parent_asin"])
+                self._products[parent_asin] = product
                 price = product.get("price")
                 self._prices[parent_asin] = float(price) if isinstance(price, (int, float)) else None
                 batch.append(
@@ -80,28 +80,195 @@ class Agent:
     def reset(self, session_id: str, user_profile: dict) -> None:
         self._sessions[session_id] = SessionState(session_id, user_profile)
 
-    def _search(self, terms: list[str], top_k: int, budget: int | None) -> list[dict]:
+    # Function that uses bm25 to search and sort items
+    def _bm25_search(self, terms: list[str], limit: int) -> list[str]:
         unique_terms = list(dict.fromkeys(terms))[:40]
-        expression = " OR ".join(f'"{term}"' for term in unique_terms)
-        if not expression:
-            return []
-        fetch_k = top_k * 5 if budget is not None else top_k
-        rows = self.connection.execute(
-            "SELECT parent_asin FROM products WHERE products MATCH ? "
-            "ORDER BY bm25(products, 0.0, 6.0, 4.0, 2.5, 2.5, 1.5, 1.0) LIMIT ?",
-            (expression, fetch_k),
-        ).fetchall()
-        recommendations: list[dict] = []
-        for (parent_asin,) in rows:
-            asin = str(parent_asin)
-            price = self._prices.get(asin)
-            if budget is not None and price is not None and price > budget:
-                continue
-            recommendations.append({"parent_asin": asin})
-            if len(recommendations) >= top_k:
-                break
-        return recommendations
 
+        if not unique_terms:
+            return []
+
+        expression = " OR ".join(f'"{term}"' for term in unique_terms)
+        rows = self.connection.execute(
+        """
+        SELECT parent_asin
+        FROM products
+        WHERE products MATCH ?
+        ORDER BY bm25(products, 0.0, 6.0, 4.0, 2.5, 2.5, 1.5, 1.0) LIMIT ?
+        """,
+        (expression, limit)
+        ).fetchall()
+
+        return [str(row[0]) for row in rows]
+
+    # Function to add Reciprocal Rank Fusion
+    def _add_rrf(self, scores: dict[str, float], results: list[str], weight: float = 1.0, k: int = 60) -> None:
+        for rank, asin in enumerate(results, start=1):
+            scores[asin] = scores.get(asin, 0.0) + (weight / (k + rank))
+
+    # Function that scores based on matches of keywords between query and product description
+    def _match_score(self, value: object, text: str) -> float:
+        if value in (None, "", []):
+            return 0.0
+
+        values = value if isinstance(value, list) else [value]
+        text_terms = set(_terms(text))
+        score = 0.0
+
+        for item in values:
+            query_terms = set(_terms(str(item)))
+
+            if not query_terms:
+                continue
+
+            overlap = len(query_terms & text_terms) / len(query_terms)
+            score += overlap
+
+        return score
+
+    def _product_fields(self, product: dict) -> dict[str, str]:
+        return {
+            "title": _text(product.get("title")).lower(),
+            "categories": _text(product.get("categories")).lower(),
+            "features": _text(product.get("features")).lower(),
+            "details": _text(product.get("details")).lower(),
+            "store": _text(product.get("store")).lower(),
+            "description": _text(product.get("description")).lower(),
+        }
+
+    # Generates score for each attribute of the product that best matches the current state
+    def _constraint_score(self, product: dict, session: SessionState) -> float:
+        fields = self._product_fields(product)
+        slots = session.slots
+
+        score = 0.0
+
+        # CATEGORY
+        category = slots.get("category")
+        if category:
+            score += 0.15 * self._match_score(
+                category,
+                fields["title"],
+            )
+
+            score += 0.15 * self._match_score(
+                category,
+                fields["categories"],
+            )
+
+        # COLOR
+        color = slots.get("color")
+        if color:
+            score += 0.05 * self._match_score(
+                color,
+                " ".join(fields.values()),
+            )
+
+        # MATERIAL
+        material = slots.get("material")
+        if material:
+            score += 0.1 * self._match_score(
+                material,
+                fields["title"] + " " + fields["features"] + " " + fields["details"] + " " + fields["description"]
+            )
+
+        # BRAND
+        brand = slots.get("brand")
+        if brand:
+            score += 0.1 * self._match_score(
+                brand,
+                fields["store"] + " " + fields["title"],
+            )
+
+        # SIZE
+        size = slots.get("size")
+        if size:
+            score += 0.05 * self._match_score(
+                size,
+                fields["details"] + " " + fields["features"],
+            )
+
+        # STYLE
+        style = slots.get("style")
+        if style:
+            score += 0.05 * self._match_score(
+                style,
+                fields["title"]
+                + " "
+                + fields["features"]
+                + " "
+                + fields["details"],
+            )
+
+        # FEATURES
+        features = slots.get("feature")
+        if features:
+            score += 0.05 * self._match_score(
+                features,
+                fields["features"]
+                + " "
+                + fields["details"]
+                + " "
+                + fields["description"],
+            )
+
+        # USE CASE
+        use_case = slots.get("use_case")
+        if use_case:
+            score += 0.05 * self._match_score(
+                use_case,
+                fields["title"]
+                + " "
+                + fields["features"]
+                + " "
+                + fields["description"],
+            )
+
+        return score
+
+    def _search(self, session: SessionState, user_message: str, top_k: int) -> list[dict]:
+        # 1. Build queries
+        slot_terms = _terms(" ".join(session.query_terms()))
+        message_terms = _terms(user_message)
+        all_terms = list(dict.fromkeys(slot_terms + message_terms))[:40]
+
+        # 2. Candidate retrieval
+        candidate_limit = 200
+        all_results = self._bm25_search(all_terms, limit=candidate_limit)
+        slot_results = self._bm25_search(slot_terms, limit=candidate_limit)
+
+        # 3. Fuse retrieval routes
+        scores: dict[str, float] = {}
+        self._add_rrf(scores, all_results, weight=1.0)
+        self._add_rrf(scores, slot_results, weight=1.3) # Fine tune the weight
+
+        # 4. Filter + Re-rank
+        budget = session.budget_limit()
+        ranked = []
+
+        for asin, retrieval_score in scores.items():
+            product = self._products[asin]
+            price = self._prices.get(asin)
+
+            if (
+                budget is not None
+                and price is not None
+                and price > budget
+            ):
+                continue
+
+            constraint_score = self._constraint_score(product, session)
+            final_score = 20.0 * retrieval_score + constraint_score # Fine tune the 20.0
+
+            ranked.append((final_score, asin))
+
+        # 5. Return top k highest scores
+        ranked.sort(reverse=True)
+
+        return [
+            {"parent_asin": asin}
+            for _, asin, in ranked[:top_k]
+        ]
+    
     def respond(
         self,
         session_id: str,
@@ -112,14 +279,16 @@ class Agent:
         session = self._sessions.get(session_id)
         if session is None:
             raise RuntimeError("reset must be called before respond")
-        usage = track(session, user_message, turn)
-        slot_terms = _terms(" ".join(session.query_terms()))
-        message_terms = _terms(user_message)
-        recommendations = self._search(slot_terms + message_terms, top_k, session.budget_limit())
-        message = session.last_assistant_message or "Here are the closest matches I found."
+        # usage = track(session, user_message, turn)
+        
+        recommendations = self._search(session, user_message, top_k)
+        # message = session.last_assistant_message or "Here are the closest matches I found."
+        message = "Here are the closest matches I found."
         return {
             "message": message,
-            "ask_attribute": session.next_ask_attribute(),
+            # "ask_attribute": session.next_ask_attribute(),
+            "ask_attribute": None,
             "recommendations": recommendations,
-            "usage": usage,
+            # "usage": usage,
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0}
         }
