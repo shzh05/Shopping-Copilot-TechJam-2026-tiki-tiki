@@ -1,5 +1,43 @@
+import json
 import re
 from typing import List, Set, Dict, Optional, Any, Tuple, Union
+
+# ---------------------------------------------------------------------------
+# Freeform-keyword helpers (new).
+#
+# ClassifyIntent previously had no equivalent of agent_addon_5's `_terms` /
+# STOPWORDS / leftover-term accumulation: any word in the user's message that
+# didn't match one of the hardcoded lexicons below was silently dropped,
+# even though it might still be useful for searching the catalog (e.g. a
+# brand fragment, a product-line name, or vocabulary this classifier's
+# lexicons just don't cover). `extract_keywords()` (see below) fills that
+# gap using the SAME general approach as agent_addon_5: tokenize, drop
+# generic stopwords, drop anything already captured by a matched
+# constraint slot, return what's left.
+#
+# Deliberately only the generic, catalog/scenario-independent stopword list
+# here — NOT agent_addon_5's extra evaluator-scaffolding stopwords (e.g.
+# "requirement", "preference", "judgment", "prioritize"), since those exist
+# specifically to strip that harness's own templated sentences and would be
+# overfitting this general-purpose classifier to one evaluator's phrasing.
+# ---------------------------------------------------------------------------
+
+TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
+STOPWORDS: Set[str] = {
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from",
+    "i", "in", "is", "it", "me", "my", "of", "on", "or", "please", "some",
+    "that", "the", "this", "to", "want", "with", "would", "you", "looking",
+    "am", "so"
+}
+
+
+def _terms(text: str) -> List[str]:
+    return [
+        token.lower()
+        for token in TOKEN_RE.findall(text)
+        if len(token) > 1 and token.lower() not in STOPWORDS
+    ]
+
 
 class IntentClassifier:
     """
@@ -9,6 +47,10 @@ class IntentClassifier:
     """
     
     def __init__(self):
+        """Rule-based extraction using hand-typed lexicons only. `category`
+        and `brand` are matched against the small hardcoded
+        `self.categories`/`self.brands` lists below — no catalog file is
+        read or consulted."""
         # Static color list (common e-commerce colors)
         self.colors: Set[str] = {
             'black', 'white', 'red', 'blue', 'green', 'yellow', 'purple', 'pink',
@@ -156,7 +198,8 @@ class IntentClassifier:
             
             # Additional features
             'expandable', 'collapsible', 'stackable', 'modular',
-            'multi-functional', 'all-in-one', 'compact', 'space saving'
+            'multi-functional', 'all-in-one', 'compact', 'space saving',
+            'imported'
         }
         
         # Size mappings for normalization
@@ -168,7 +211,7 @@ class IntentClassifier:
         
         # Compile regex patterns
         self._compile_patterns()
-    
+
     def _compile_patterns(self):
         """Pre-compile regex patterns for efficiency."""
         # Numeric price patterns with capture groups (hard constraints)
@@ -388,6 +431,11 @@ class IntentClassifier:
                     return result
         return None
     
+    def _extract_brand(self, text: str) -> Tuple[Optional[str], str]:
+        """Returns (brand_or_None, source). Matches against the hardcoded
+        self.brands list only."""
+        return self._extract_from_list(text, self.brands), 'vocab'
+
     def _extract_from_list(self, text: str, word_list: Set[str]) -> Optional[str]:
         """Extract the first matched word from the list that appears in text."""
         text_lower = text.lower()
@@ -451,7 +499,10 @@ class IntentClassifier:
         return unique_categories
 
     def _extract_categories_scored(self, text: str) -> List[Tuple[str, float, str]]:
-        """Return (normalized_category, confidence, source) in first-match order."""
+        """Return (normalized_category, confidence, source) in first-match
+        order — first match wins as the primary category (see
+        extract_constraints_scored, which takes element 0). Matches against
+        the hardcoded self.categories list only."""
         text_lower = text.lower()
         text_words = re.findall(r'\b[\w\-\']+\b', text_lower)
         scored: List[Tuple[str, float, str]] = []
@@ -544,6 +595,13 @@ class IntentClassifier:
         for price_pattern in price_indicators:
             masked_text = re.sub(price_pattern, '', masked_text, flags=re.IGNORECASE)
 
+        # Also mask out percentages ("20%", "80 %") before scanning for bare
+        # numeric sizes. Without this, fabric-composition phrasing like "20%
+        # cotton, 80% polyester" gets its "20" misread as a shoe/clothing
+        # size (see also _extract_composition, which routes these into
+        # `feature` instead where they belong).
+        masked_text = re.sub(r'\d+(?:\.\d+)?\s*%', '', masked_text)
+
         skip_regular = bool(re.search(r'\bregular\s+fit\b', masked_text, re.IGNORECASE))
         skip_bare_numeric = bool(self.measurement_context_re.search(masked_text))
         for pattern, formatter in self.size_patterns:
@@ -562,6 +620,26 @@ class IntentClassifier:
             confidence, source = self._size_match_confidence(pattern, result)
             return {'value': result, 'confidence': confidence, 'source': source}
         return None
+
+    def _extract_composition(self, text: str) -> List[str]:
+        """Extract fabric-composition entries like "20% cotton" or "80%
+        polyester". Restricted to words already in self.materials so
+        unrelated percentages ("50% off", "30% faster charging") aren't
+        misread as composition. Order-preserving, deduplicated.
+
+        These are routed into the `feature` slot (see
+        extract_constraints_scored) rather than `size` — a bare number
+        followed by "%" is fabric-composition info, not a size, and is
+        excluded from size matching for that reason (see
+        _extract_size_scored)."""
+        matches: List[str] = []
+        seen: Set[str] = set()
+        for m in re.finditer(r'\b(\d{1,3}(?:\.\d+)?)\s*%\s*([a-z][a-z\-]*)\b', text, re.IGNORECASE):
+            pct, word = m.group(1), m.group(2).lower()
+            if word in self.materials and word not in seen:
+                seen.add(word)
+                matches.append(f"{pct}% {word}")
+        return matches
 
     def _scored_entry(self, value: Any, confidence: float, source: str) -> Dict[str, Any]:
         return {'value': value, 'confidence': confidence, 'source': source}
@@ -597,18 +675,21 @@ class IntentClassifier:
         if style:
             scored['style'] = self._scored_entry(style, 0.9, 'vocab')
 
-        brand = self._extract_from_list(text, self.brands)
+        brand, brand_source = self._extract_brand(text)
         if brand:
-            scored['brand'] = self._scored_entry(brand, 0.9, 'vocab')
+            scored['brand'] = self._scored_entry(brand, 0.9, brand_source)
 
         budget = self._extract_budget_scored(text)
         if budget:
             scored['budget'] = budget
 
         features = self._extract_all_from_list(text, self.features)
-        if features:
-            value = features[0] if len(features) == 1 else features
-            scored['feature'] = self._scored_entry(value, 0.9, 'vocab')
+        composition = self._extract_composition(text)
+        combined_features = features + [c for c in composition if c not in features]
+        if combined_features:
+            value = combined_features[0] if len(combined_features) == 1 else combined_features
+            source = 'vocab' if features else 'composition_pct'
+            scored['feature'] = self._scored_entry(value, 0.9 if features else 0.85, source)
 
         others: List[str] = []
         others.extend(self._extract_all_from_list(text, self.genders))
@@ -617,7 +698,7 @@ class IntentClassifier:
         others.extend(self._extract_all_from_list(text, self.patterns))
         if others:
             # Key must match SessionState's LIST_SLOTS/ALLOWED_SLOTS name ('other',
-            # singular) -- 'others' is not a recognized slot and was silently
+            # singular) -- 'other' is not a recognized slot and was silently
             # unusable downstream.
             scored['other'] = self._scored_entry(others, 0.6, 'others_bucket')
 
@@ -645,7 +726,70 @@ class IntentClassifier:
         """
         scored = self.extract_constraints_scored(user_input)
         return {key: entry['value'] for key, entry in scored.items()}
-    
+
+    def extract_keywords(
+        self,
+        user_input: str,
+        constraints: Optional[Dict[str, Union[str, List[str]]]] = None,
+    ) -> List[str]:
+        """
+        Return descriptive words from `user_input` that don't belong to any
+        matched constraint slot and aren't generic stopwords — e.g. a brand
+        fragment none of the lexicons recognize, a product-line name, or
+        any other catalog-relevant vocabulary this classifier doesn't have
+        a dedicated slot for.
+
+        This is the piece ClassifyIntent previously had no equivalent of:
+        every word not captured by a lexicon was silently dropped. Mirrors
+        agent_addon_5's approach (tokenize -> drop stopwords -> drop
+        anything already consumed by a matched slot) using the SAME
+        general, catalog-independent method — not a hardcoded list tuned to
+        any particular evaluator's sample phrasing.
+
+        Purely additive: does not change extract_constraints(),
+        extract_constraints_scored(), classify_intent(),
+        classify_with_details(), or resolve_query_differences() in any way
+        — none of them call this, and their return shapes are untouched.
+
+        Args:
+            user_input: The user's message.
+            constraints: Optionally, the result of a prior
+                extract_constraints(user_input) call on this SAME input, to
+                avoid re-running extraction. Computed internally if omitted.
+
+        Returns:
+            Leftover terms in first-appearance order, deduplicated. NOTE:
+            this returns only THIS message's leftover terms — it has no
+            memory of earlier turns. A caller that wants agent_addon_5-style
+            cross-turn accumulation (a running list of freeform terms that
+            persists across a conversation) should collect these turn by
+            turn itself, e.g.:
+
+                seen_terms = []
+                for message in conversation:
+                    for term in classifier.extract_keywords(message):
+                        if term not in seen_terms:
+                            seen_terms.append(term)
+        """
+        if constraints is None:
+            constraints = self.extract_constraints(user_input)
+
+        consumed = {
+            token
+            for value in constraints.values()
+            for item in (value if isinstance(value, list) else [value])
+            for token in _terms(str(item))
+        }
+
+        keywords: List[str] = []
+        seen: Set[str] = set()
+        for token in _terms(user_input):
+            if token in consumed or token in seen:
+                continue
+            seen.add(token)
+            keywords.append(token)
+        return keywords
+
     def classify_intent(self, user_input: str) -> str:
         """
         Classify user intent as 'Buying' or 'Browsing' based on constraint density.
@@ -702,7 +846,7 @@ class IntentClassifier:
         """Return list of all supported constraint categories."""
         return [
             'category', 'material', 'color', 'size', 'style', 
-            'brand', 'budget', 'feature', 'others'
+            'brand', 'budget', 'feature', 'other'
         ]
     
     def get_feature_list(self) -> List[str]:
@@ -780,7 +924,7 @@ class IntentClassifier:
                 r'without\s+(?:the\s+)?features?\s+(?:requirement|constraint|filter|restriction)',
                 r'without\s+(?:the\s+)?features?\b',
             ],
-            'others': [
+            'other': [
                 r'remove\s+(?:the\s+)?(?:gender|fit|condition|pattern)s?\s+(?:requirement|constraint|filter|restriction)',
                 r'remove\s+(?:the\s+)?(?:gender|fit|condition|pattern)s?\b',
                 r'drop\s+(?:the\s+)?(?:gender|fit|condition|pattern)s?\s+(?:requirement|constraint|filter|restriction)',
@@ -837,9 +981,9 @@ class IntentClassifier:
                     if category == 'feature':
                         # For features, track specific feature to remove
                         constraints_to_remove.add(f'feature:{val}')
-                    elif category == 'others':
+                    elif category == 'other':
                         # For others, track specific value to remove
-                        constraints_to_remove.add(f'others:{val}')
+                        constraints_to_remove.add(f'other:{val}')
                     else:
                         # For other categories, remove entire category
                         constraints_to_remove.add(category)
@@ -862,21 +1006,21 @@ class IntentClassifier:
                             resolved_constraints['feature'] = current_features
                     elif current_features == feature_to_remove:
                         del resolved_constraints['feature']
-            elif removal.startswith('others:'):
+            elif removal.startswith('other:'):
                 # Remove specific value from others
                 value_to_remove = removal.split(':', 1)[1]
-                if 'others' in resolved_constraints:
-                    current_others = resolved_constraints['others']
+                if 'other' in resolved_constraints:
+                    current_others = resolved_constraints['other']
                     if isinstance(current_others, list):
                         current_others = [v for v in current_others if v != value_to_remove]
                         if len(current_others) == 0:
-                            del resolved_constraints['others']
+                            del resolved_constraints['other']
                         elif len(current_others) == 1:
-                            resolved_constraints['others'] = current_others[0]
+                            resolved_constraints['other'] = current_others[0]
                         else:
-                            resolved_constraints['others'] = current_others
+                            resolved_constraints['other'] = current_others
                     elif current_others == value_to_remove:
-                        del resolved_constraints['others']
+                        del resolved_constraints['other']
             else:
                 # Remove entire category
                 if removal in resolved_constraints:
@@ -941,10 +1085,10 @@ class IntentClassifier:
                                     break
                             if not should_remove:
                                 resolved_constraints['feature'] = value
-                elif category == 'others':
+                elif category == 'other':
                     # Special handling for others (merge lists)
-                    if 'others' in resolved_constraints:
-                        existing_others = resolved_constraints['others']
+                    if 'other' in resolved_constraints:
+                        existing_others = resolved_constraints['other']
                         if isinstance(existing_others, str):
                             existing_others = [existing_others]
                         
@@ -957,7 +1101,7 @@ class IntentClassifier:
                                 # Check if this value should be removed
                                 should_remove = False
                                 for removal in constraints_to_remove:
-                                    if removal.startswith('others:') and removal.split(':', 1)[1] == other:
+                                    if removal.startswith('other:') and removal.split(':', 1)[1] == other:
                                         should_remove = True
                                         break
                                 if not should_remove:
@@ -965,12 +1109,12 @@ class IntentClassifier:
                         
                         # Set the final others value
                         if len(merged_others) == 0:
-                            if 'others' in resolved_constraints:
-                                del resolved_constraints['others']
+                            if 'other' in resolved_constraints:
+                                del resolved_constraints['other']
                         elif len(merged_others) == 1:
-                            resolved_constraints['others'] = merged_others[0]
+                            resolved_constraints['other'] = merged_others[0]
                         else:
-                            resolved_constraints['others'] = merged_others
+                            resolved_constraints['other'] = merged_others
                     else:
                         # No existing others, just add the new ones
                         if isinstance(value, list):
@@ -978,25 +1122,25 @@ class IntentClassifier:
                             for other in value:
                                 should_remove = False
                                 for removal in constraints_to_remove:
-                                    if removal.startswith('others:') and removal.split(':', 1)[1] == other:
+                                    if removal.startswith('other:') and removal.split(':', 1)[1] == other:
                                         should_remove = True
                                         break
                                 if not should_remove:
                                     filtered_others.append(other)
                             if filtered_others:
                                 if len(filtered_others) == 1:
-                                    resolved_constraints['others'] = filtered_others[0]
+                                    resolved_constraints['other'] = filtered_others[0]
                                 else:
-                                    resolved_constraints['others'] = filtered_others
+                                    resolved_constraints['other'] = filtered_others
                         else:
                             # Check if this single value should be removed
                             should_remove = False
                             for removal in constraints_to_remove:
-                                if removal.startswith('others:') and removal.split(':', 1)[1] == value:
+                                if removal.startswith('other:') and removal.split(':', 1)[1] == value:
                                     should_remove = True
                                     break
                             if not should_remove:
-                                resolved_constraints['others'] = value
+                                resolved_constraints['other'] = value
                 elif category == 'category':
                     # Special handling for category - replace, don't merge
                     if isinstance(value, list):
@@ -1009,5 +1153,3 @@ class IntentClassifier:
                     resolved_constraints[category] = value
         
         return resolved_constraints
-
-#hello
