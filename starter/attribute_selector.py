@@ -3,9 +3,7 @@ Things to adjust:
 Attribute definitions; what should be classified under style, use-case, feature, etc.?
 
 Price bucketing; what thresholds for budget?
-"""
 
-"""
 (Handwritten by me)
 Proactive Guidance: pick the single most useful unknown attribute to ask
 about, given what we already know and the current candidate pool.
