@@ -372,6 +372,10 @@ def choose_attribute(
     nothing landed in `slots`/`unspecified`. Without this, the same
     question could get re-asked turn after turn since, from `known`'s
     point of view alone, the slot still looks untouched.
+
+    Returns a synthetic attribute="other" SlotSuggestion (never None) when
+    every slot is already known/asked, or when none of the remaining
+    unknown slots have a detectable value anywhere in `candidates`.
     """
     known_norm = normalize_known(known)
     already_asked = asked or set()
@@ -384,7 +388,19 @@ def choose_attribute(
     qualified = [s for s in scored if s.coverage >= min_coverage]
     pool = qualified or scored
     if not pool:
-        return None
+        # Nothing left worth asking: either every slot is already
+        # known/asked, or none of the remaining unknown slots have a
+        # detectable value anywhere in the candidate pool. Rather than
+        # returning None (which callers would have to special-case),
+        # fall back to a synthetic "other" suggestion so there's always
+        # something to ask about.
+        return SlotSuggestion(
+            attribute="other",
+            top_values=[],
+            coverage=0.0,
+            expected_remaining=float(len(candidates)),
+            candidate_count=len(candidates),
+        )
 
     # Lower expected_remaining wins; break ties by preferring higher coverage
     # (a question more of the pool can actually answer).
@@ -402,6 +418,7 @@ _PROMPT_TEMPLATES = {
     "budget": "What's your budget?",
     "feature": "Any must-have features — {options}, or something else?",
     "use_case": "What's it for — {options}, or something else?",
+    "other": "Is there anything else about what you're looking for that I should know?",
 }
 
 #returns the prompt
