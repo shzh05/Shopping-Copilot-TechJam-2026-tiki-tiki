@@ -287,7 +287,7 @@ class Agent:
         return {
             "message": message,
             # "ask_attribute": session.next_ask_attribute(),
-            "ask_attribute": None,
+            "ask_attribute": "other",
             "recommendations": recommendations,
             # "usage": usage,
             "usage": {"prompt_tokens": 0, "completion_tokens": 0}

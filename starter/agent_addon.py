@@ -260,6 +260,9 @@ class Agent:
             ):
                 continue
 
+            if asin in session.rejected_asins:
+                continue
+
             constraint_score = self._constraint_score(product, session)
             final_score = 20.0 * retrieval_score + constraint_score # Fine tune the 20.0
 
@@ -272,6 +275,7 @@ class Agent:
 
     def _search(self, session: SessionState, user_message: str, top_k: int) -> list[dict]:
         ranked_asins = self._ranked_asins(session, user_message)
+        session.rejected_asins += ranked_asins[:top_k]
 
         return [
             {"parent_asin": asin}
