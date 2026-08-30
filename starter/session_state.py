@@ -61,6 +61,10 @@ class SessionState:
         self.unspecified: set[str] = set()
         self.history: list[dict[str, Any]] = []
         self.last_assistant_message: str | None = None
+        self.asked: set[str] = set()
+
+    def asked_attributes(self) -> set():
+        return self.asked
 
     def _record(self, turn: int | None, action: str, name: str, old: Any, new: Any) -> None:
         self.history.append(
