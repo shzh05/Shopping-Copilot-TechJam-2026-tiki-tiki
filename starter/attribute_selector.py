@@ -1,4 +1,11 @@
 """
+Things to adjust:
+Attribute definitions; what should be classified under style, use-case, feature, etc.?
+
+Price bucketing; what thresholds for budget?
+"""
+
+"""
 (Handwritten by me)
 Proactive Guidance: pick the single most useful unknown attribute to ask
 about, given what we already know and the current candidate pool.
@@ -182,7 +189,7 @@ _SLOT_VOCAB: dict[str, list] = {
     "color": [_CLASSIFIER.colors],
     "brand": [_CLASSIFIER.brands],
     "style": [_CLASSIFIER.fits, _CLASSIFIER.patterns],
-    "use_case": [_CLASSIFIER.occasions],
+    "use_case": [_CLASSIFIER.style],
     "feature": [_CLASSIFIER.features],
 }
 
@@ -191,11 +198,13 @@ _SIZE_TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 
+
+#Splits price into categories for the budget slot
 # Bucket ceilings in USD; the final bucket is open-ended ("$100+").
 _PRICE_EDGES = [15, 30, 50, 100]
 _PRICE_RE = re.compile(r"(\d+(?:\.\d+)?)")
 
-
+#Parses a raw price value from the catalog into a float, or None if it can't be parsed.
 def _parse_price(raw: Any) -> Optional[float]:
     """Best-effort float parse. Catalog prices show up as None, a float,
     or strings like 'from 21.30' or '—'."""
@@ -206,7 +215,7 @@ def _parse_price(raw: Any) -> Optional[float]:
     match = _PRICE_RE.search(str(raw))
     return float(match.group(1)) if match else None
 
-
+#Price buckets for the budget slot, e.g. "under $15", "under $30", etc.
 def _price_bucket(price: float) -> str:
     for edge in _PRICE_EDGES:
         if price < edge:
@@ -228,7 +237,6 @@ def _product_text(product: dict) -> str:
         parts.extend(f"{k} {v}" for k, v in details.items())
     return " ".join(parts).lower()
 
-
 def _values_for_slot(slot: str, product: dict, text: str) -> list[str]:
     """Every distinct (normalized) value this product exposes for `slot`."""
     if slot == "budget":
@@ -246,7 +254,7 @@ def _values_for_slot(slot: str, product: dict, text: str) -> list[str]:
 
 
 # --------------------------------------------------------------------------
-# Scoring
+# Scoring (Comparing unknown slots by how well they split the candidate pool)
 # --------------------------------------------------------------------------
 
 def _pick_diverse_values(counts: Counter, k: int = 4) -> list[str]:
@@ -324,6 +332,7 @@ def _score_slot(slot: str, candidates: list[dict]) -> Optional[SlotSuggestion]:
     )
 
 
+#converts a SessionState snapshot into a `known` dict suitable for `choose_attribute`.
 def known_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     """
     Adapter for SessionState.snapshot()'s exact return shape (see
@@ -341,7 +350,7 @@ def known_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         known.setdefault(name, "no preference")
     return known
 
-
+#returns the most useful unknown attribute
 def choose_attribute(
     known: dict[str, Any],
     candidates: list[dict],
@@ -384,7 +393,7 @@ _PROMPT_TEMPLATES = {
     "use_case": "What's it for — {options}, or something else?",
 }
 
-
+#returns the prompt
 def generate_prompt(suggestion: SlotSuggestion, noun: str = "item") -> str:
     options = ", ".join(suggestion.top_values[:3])
     template = _PROMPT_TEMPLATES.get(suggestion.attribute, "Any preference for {options}?")
