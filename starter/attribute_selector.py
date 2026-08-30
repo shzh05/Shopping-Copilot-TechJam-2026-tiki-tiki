@@ -353,6 +353,7 @@ def choose_attribute(
     known: dict[str, Any],
     candidates: list[dict],
     min_coverage: float = 0.15,
+    asked: set[str] | None = None,
 ) -> Optional[SlotSuggestion]:
     """
     Pick the unknown slot whose values best split `candidates`.
@@ -363,9 +364,21 @@ def choose_attribute(
     Slots where fewer than `min_coverage` of candidates expose a value are
     deprioritized (but used as a fallback if nothing else qualifies, so we
     still ask *something* rather than nothing).
+
+    `asked`: attributes already put to the user this session (see
+    SessionState.asked). These are excluded from consideration even if
+    `known` doesn't (yet) reflect an answer or an explicit "no preference"
+    -- e.g. the user ignored the question, or answered ambiguously and
+    nothing landed in `slots`/`unspecified`. Without this, the same
+    question could get re-asked turn after turn since, from `known`'s
+    point of view alone, the slot still looks untouched.
     """
     known_norm = normalize_known(known)
-    unknown_slots = [s for s in SLOT_ATTRIBUTES if not known_norm.get(s)]
+    already_asked = asked or set()
+    unknown_slots = [
+        s for s in SLOT_ATTRIBUTES
+        if not known_norm.get(s) and s not in already_asked
+    ]
 
     scored = [s for s in (_score_slot(slot, candidates) for slot in unknown_slots) if s]
     qualified = [s for s in scored if s.coverage >= min_coverage]
@@ -398,14 +411,18 @@ def generate_prompt(suggestion: SlotSuggestion, noun: str = "item") -> str:
     return template.format(options=options, noun=noun)
 
 
-def propose_clarification(known: dict[str, Any], candidates: list[dict]) -> dict:
+def propose_clarification(
+    known: dict[str, Any],
+    candidates: list[dict],
+    asked: set[str] | None = None,
+) -> dict:
     """
     Top-level entry point for one turn of proactive guidance.
 
     Returns: {"ask_attribute": <slot or None>, "message": <prompt text or None>}
     -- shaped to drop straight into the turn_response contract.
     """
-    suggestion = choose_attribute(known, candidates)
+    suggestion = choose_attribute(known, candidates, asked=asked)
     if suggestion is None:
         return {"ask_attribute": None, "message": None}
     known_norm = normalize_known(known)

@@ -281,15 +281,23 @@ class Agent:
     # Feeds the current session state (slots the user has already given)
     # together with the top 300 candidates from _search's ranking into
     # attribute_selector.choose_attribute to figure out the single most
-    # useful attribute to ask the user about next.
+    # useful attribute to ask the user about next. Attributes already put
+    # to the user this session (session.asked) are excluded, and whatever
+    # gets chosen here is recorded into session.asked before it's returned
+    # -- so a "no preference"/ignored answer doesn't cause the same
+    # question to get re-asked turn after turn.
     def _select_ask_attribute(self, session: SessionState, user_message: str) -> str | None:
         ranked_asins = self._ranked_asins(session, user_message)
         candidate_pool = [self._products[asin] for asin in ranked_asins[:300]]
 
         known = known_from_snapshot(session.snapshot())
-        suggestion = choose_attribute(known, candidate_pool)
+        suggestion = choose_attribute(known, candidate_pool, asked=session.asked)
 
-        return suggestion.attribute if suggestion is not None else None
+        if suggestion is None:
+            return None
+
+        session.asked.add(suggestion.attribute)
+        return suggestion.attribute
 
     def respond(
         self,
