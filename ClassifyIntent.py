@@ -31,10 +31,8 @@ class IntentClassifier:
             'nylon', 'spandex', 'cashmere', 'velvet', 'suede', 'flannel', 'fleece',
             'canvas', 'mesh', 'satin', 'lace', 'chiffon', 'tweed', 'corduroy', 
             'stainless steel', 'sterling silver', 'platinum', 'gold', 'silver',
-            # Jewelry / watch materials
-            'alloy', 'titanium', 'rose gold', 'gold plated', 'gold-plated',
-            'copper', 'brass', 'zinc alloy', 'cubic zirconia', 'rhodium',
-            'tungsten', 'ceramic', 'resin', 'acrylic',
+            'alloy', 'chromium', 'titanium', 'tungsten', 'copper', 'brass',
+            'bronze', 'pewter', 'nickel', 'cobalt', 'zinc', 'iron', 'aluminum'
         }
         
         # Pattern/print terms
@@ -74,7 +72,7 @@ class IntentClassifier:
             'sneakers', 'heels', 'suit', 'blazer', 'coat',
             'swimsuit', 'underwear', 'bra', 'leggings', 
             'cardigan', 'cardigans', 'vest', 'earrings', 'ring', 'studs', 
-            'necklace', 'chain',
+            'necklace', 'chain', 'jewelry', 'bracelet', 'pendant',
         }
         
         # Define singular-to-plural mapping for special cases
@@ -109,6 +107,8 @@ class IntentClassifier:
             'ring': 'rings',
             'necklace': 'necklaces',
             'chain': 'chains',
+            'bracelet': 'bracelets',
+            'pendant': 'pendants',
         }
         
         # Define plural-to-singular mapping (reverse of above, for normalization)
@@ -118,7 +118,7 @@ class IntentClassifier:
         self.inherently_plural = {
             'pants', 'jeans', 'shorts', 'leggings', 'sunglasses', 
             'earrings', 'studs', 'socks', 'shoes', 'boots', 'sandals',
-            'sneakers', 'heels', 'gloves'
+            'sneakers', 'heels', 'gloves', 'jewelry'
         }
         
         # Condition terms
@@ -166,6 +166,26 @@ class IntentClassifier:
             'extra large': 'XL', 'extra small': 'XS', '3XL': 'XXXL', '2XL': 'XXL'
         }
         
+        # Phrases that indicate key considerations or main points
+        self.key_phrase_patterns = [
+            r'key considerations?\s*(?:are|is)?\s*:?',
+            r'main points?\s*(?:are|is)?\s*:?',
+            r'what matters\s*(?:is|are)?\s*:?',
+            r'important (?:things?|factors?|aspects?)\s*(?:are|is)?\s*:?',
+            r'key (?:things?|factors?|aspects?|requirements?|features?)\s*(?:are|is)?\s*:?',
+            r'essential (?:things?|factors?|aspects?)\s*(?:are|is)?\s*:?',
+            r'critical (?:things?|factors?|aspects?)\s*(?:are|is)?\s*:?',
+            r'must[- ]haves?\s*(?:are|is)?\s*:?',
+            r'priorities?\s*(?:are|is)?\s*:?',
+            r'focus (?:on|areas?)\s*(?:are|is)?\s*:?',
+            r'requirements?\s*(?:are|is)?\s*:?',
+            r'it must be\s*:?',
+            r'must be\s*:?',
+            r'should be\s*:?',
+            r'needs to be\s*:?',
+            r'has to be\s*:?',
+        ]
+        
         # Compile regex patterns
         self._compile_patterns()
     
@@ -205,15 +225,39 @@ class IntentClassifier:
             (r'(?<!\$)(?<!\b\d)(?<![\d.])(\d{1,2}(?:\.\d+)?)(?![\d.])(?!\s*(?:dollars|bucks|USD))', 
             lambda m: m.group(1) if 4 <= float(m.group(1)) <= 22 else None)
         ]
-
-        # Cue words that indicate a nearby bare number is a product
-        # measurement/dimension (e.g. "shaft measures approximately 8.37\"
-        # from arch") rather than a size the user is asking for.
-        self.measurement_context_re = re.compile(
-            r'\b(measures?|approximat\w*|circumference|diameter|shaft|'
-            r'from\s+(?:the\s+)?(?:arch|heel|floor)|rise|drop|wingspan)\b',
-            re.IGNORECASE,
-        )
+        
+        # Compile key phrase patterns
+        self.compiled_key_phrase_patterns = [
+            re.compile(pattern, re.IGNORECASE) for pattern in self.key_phrase_patterns
+        ]
+        
+        # Patterns for extracting constraint values after key phrases
+        self.constraint_extraction_patterns = [
+            # Pattern for "Material: X" or "material: X"
+            (r'\b(?:material|fabric|made of)\s*:\s*([^,.]+)', 'material'),
+            # Pattern for "Color: X" or "color: X"
+            (r'\b(?:color|colour)\s*:\s*([^,.]+)', 'color'),
+            # Pattern for "Size: X" or "size: X"
+            (r'\b(?:size|sizing)\s*:\s*([^,.]+)', 'size'),
+            # Pattern for "Brand: X" or "brand: X"
+            (r'\b(?:brand|make)\s*:\s*([^,.]+)', 'brand'),
+            # Pattern for "Style: X" or "style: X"
+            (r'\b(?:style|type|kind)\s*:\s*([^,.]+)', 'style'),
+            # Pattern for "Price: X" or "price: X" or "budget: X"
+            (r'\b(?:price|budget|cost)\s*:\s*([^,.]+)', 'budget'),
+            # Pattern for "Feature: X" or "feature: X"
+            (r'\b(?:feature|features?|with)\s*:\s*([^,.]+)', 'feature'),
+            # Pattern for "Category: X" or "category: X"
+            (r'\b(?:category|type of)\s*:\s*([^,.]+)', 'category'),
+            # Pattern for other attribute: value pairs
+            (r'\b([a-z]+(?:\s+[a-z]+)*)\s*:\s*([^,.]+)', 'other'),
+        ]
+        
+        # Compile constraint extraction patterns
+        self.compiled_constraint_patterns = [
+            (re.compile(pattern, re.IGNORECASE), category) 
+            for pattern, category in self.constraint_extraction_patterns
+        ]
     
     def _normalize_size(self, size: str) -> str:
         """Normalize size representations.(e.g., "extra large" → "XL")"""
@@ -449,192 +493,144 @@ class IntentClassifier:
                 unique_categories.append(cat)
         
         return unique_categories
-
-    def _extract_categories_scored(self, text: str) -> List[Tuple[str, float, str]]:
-        """Return (normalized_category, confidence, source) in first-match order."""
+    
+    def _extract_key_phrase_constraints(self, text: str) -> List[str]:
+        """
+        Extract constraint values from key phrases in the text.
+        This method identifies key phrase indicators and extracts the actual
+        constraint values that follow them (e.g., "Material: alloy" → "Material: alloy").
+        """
+        constraints_found = []
         text_lower = text.lower()
-        text_words = re.findall(r'\b[\w\-\']+\b', text_lower)
-        scored: List[Tuple[str, float, str]] = []
-        seen = set()
-
-        def _add(name: str, confidence: float, source: str) -> None:
-            if name in seen:
-                return
-            seen.add(name)
-            scored.append((name, confidence, source))
-
-        for category in self.categories:
-            if ' ' in category or '-' in category:
-                if re.search(rf'\b{re.escape(category)}\b', text_lower):
-                    _add(category, 0.9, 'vocab')
-
-        for word in text_words:
-            word_lower = word.lower().strip()
-            if word_lower in self.categories:
-                _add(word_lower, 0.9, 'vocab')
+        
+        # Find all positions where key phrases occur
+        key_phrase_positions = []
+        for pattern in self.compiled_key_phrase_patterns:
+            for match in pattern.finditer(text_lower):
+                key_phrase_positions.append((match.start(), match.end()))
+        
+        # Sort positions by start index
+        key_phrase_positions.sort(key=lambda x: x[0])
+        
+        # Extract content after each key phrase
+        for start, end in key_phrase_positions:
+            # Get the content after the key phrase
+            content_after = text[end:].strip()
+            
+            if not content_after:
                 continue
-            if word_lower in self.inherently_plural:
-                _add(word_lower, 0.9, 'vocab')
-                continue
-            normalized = self._normalize_category(word)
-            if normalized in self.categories:
-                source = 'pluralization' if normalized != word_lower else 'vocab'
-                confidence = 0.6 if source == 'pluralization' else 0.9
-                _add(normalized, confidence, source)
-
-        return scored
-
-    def _extract_budget_scored(self, text: str) -> Optional[Dict[str, Any]]:
-        prices: List[Tuple[str, str]] = []
-        for pattern, formatter in self.price_patterns:
-            matches = re.finditer(pattern, text, re.IGNORECASE)
-            for match in matches:
-                formatted = formatter(match)
-                prices.append((formatted, pattern))
-        if not prices:
-            return None
-
-        if len(prices) > 1:
-            numeric_values = []
-            for price, _ in prices:
-                numbers = re.findall(r'\d+(?:\.\d+)?', price)
-                for num in numbers:
-                    numeric_values.append(float(num))
-            if numeric_values:
-                max_price = max(numeric_values)
-                if max_price == int(max_price):
-                    value = f"${int(max_price)}"
-                else:
-                    value = f"${max_price:.2f}"
+            
+            # Try to extract structured constraint values (e.g., "Material: alloy")
+            extracted_structured = self._extract_structured_constraints(content_after)
+            if extracted_structured:
+                constraints_found.extend(extracted_structured)
             else:
-                value = prices[0][0]
-        else:
-            value = prices[0][0]
-
-        patterns_used = [pattern for _, pattern in prices]
-        high_cue = any(
-            token in pattern
-            for pattern in patterns_used
-            for token in ('$', 'under', 'less than', 'below', 'over', 'more than',
-                          'above', 'between', 'bucks', 'dollars')
-        )
-        return {
-            'value': value,
-            'confidence': 0.9 if high_cue else 0.6,
-            'source': 'currency' if high_cue else 'bare_number',
-        }
-
-    def _size_match_confidence(self, pattern: str, result: str) -> Tuple[float, str]:
-        if pattern == (
-            r'(?<!\$)(?<!\b\d)(?<![\d.])(\d{1,2}(?:\.\d+)?)(?![\d.])(?!\s*(?:dollars|bucks|USD))'
-        ):
-            return 0.4, 'numeric_size'
-        letter_tokens = {'XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL'}
-        if result.upper() in letter_tokens and 'small' not in pattern and 'medium' not in pattern and 'large' not in pattern:
-            return 0.6, 'letter_size'
-        if 'inch' in pattern or 'us|uk|eu' in pattern:
-            return 0.6, 'measurement'
-        if pattern in (r'\bregular\b', r'\bshort\b'):
-            return 0.6, 'ambiguous_size'
-        return 0.9, 'vocab'
-
-    def _extract_size_scored(self, text: str) -> Optional[Dict[str, Any]]:
-        price_indicators = [r'\$\s*\d+(?:\.\d+)?', r'\d+(?:\.\d+)?\s*(?:dollars|bucks|USD)']
-        masked_text = text
-        for price_pattern in price_indicators:
-            masked_text = re.sub(price_pattern, '', masked_text, flags=re.IGNORECASE)
-
-        skip_regular = bool(re.search(r'\bregular\s+fit\b', masked_text, re.IGNORECASE))
-        skip_bare_numeric = bool(self.measurement_context_re.search(masked_text))
-        for pattern, formatter in self.size_patterns:
-            if skip_regular and pattern == r'\bregular\b':
-                continue
-            if skip_bare_numeric and pattern == (
-                r'(?<!\$)(?<!\b\d)(?<![\d.])(\d{1,2}(?:\.\d+)?)(?![\d.])(?!\s*(?:dollars|bucks|USD))'
-            ):
-                continue
-            match = re.search(pattern, masked_text, re.IGNORECASE)
-            if not match:
-                continue
-            result = formatter(match)
-            if not result:
-                continue
-            confidence, source = self._size_match_confidence(pattern, result)
-            return {'value': result, 'confidence': confidence, 'source': source}
-        return None
-
-    def _scored_entry(self, value: Any, confidence: float, source: str) -> Dict[str, Any]:
-        return {'value': value, 'confidence': confidence, 'source': source}
-
-    def extract_constraints_scored(self, user_input: str) -> Dict[str, Dict[str, Any]]:
+                # If no structured constraints found, try to extract simple values
+                # Split by common separators
+                items = re.split(r'[,;]|\band\b|\bor\b', content_after)
+                for item in items:
+                    item = item.strip()
+                    if item and len(item) > 1:
+                        # Check if the item itself contains a constraint pattern
+                        item_constraints = self._extract_structured_constraints(item)
+                        if item_constraints:
+                            constraints_found.extend(item_constraints)
+                        elif len(item.split()) <= 3:  # Only add short phrases as others
+                            constraints_found.append(item)
+        
+        # Remove duplicates while preserving order
+        unique_constraints = []
+        for constraint in constraints_found:
+            if constraint not in unique_constraints:
+                unique_constraints.append(constraint)
+        
+        return unique_constraints
+    
+    def _extract_structured_constraints(self, text: str) -> List[str]:
         """
-        Extract constraints with heuristic confidence and source tags.
-
-        Each entry is {"value": str|list, "confidence": float, "source": str}.
-        Does not change extract_constraints() return shape.
+        Extract structured constraint values from text (e.g., "Material: alloy").
+        Returns a list of constraint strings in the format "category: value".
         """
-        text = user_input.strip()
-        scored: Dict[str, Dict[str, Any]] = {}
-
-        categories = self._extract_categories_scored(text)
-        if categories:
-            name, confidence, source = categories[0]
-            scored['category'] = self._scored_entry(name, confidence, source)
-
-        materials = self._extract_all_from_list(text, self.materials)
-        if materials:
-            scored['material'] = self._scored_entry(materials[0], 0.9, 'vocab')
-
-        colors = self._extract_all_from_list(text, self.colors)
-        if colors:
-            scored['color'] = self._scored_entry(colors[0], 0.9, 'vocab')
-
-        size = self._extract_size_scored(text)
-        if size:
-            scored['size'] = size
-
-        style = self._extract_from_list(text, self.style)
-        if style:
-            scored['style'] = self._scored_entry(style, 0.9, 'vocab')
-
-        brand = self._extract_from_list(text, self.brands)
-        if brand:
-            scored['brand'] = self._scored_entry(brand, 0.9, 'vocab')
-
-        budget = self._extract_budget_scored(text)
-        if budget:
-            scored['budget'] = budget
-
-        features = self._extract_all_from_list(text, self.features)
-        if features:
-            value = features[0] if len(features) == 1 else features
-            scored['feature'] = self._scored_entry(value, 0.9, 'vocab')
-
-        others: List[str] = []
-        others.extend(self._extract_all_from_list(text, self.genders))
-        others.extend(self._extract_all_from_list(text, self.fits))
-        others.extend(self._extract_all_from_list(text, self.conditions))
-        others.extend(self._extract_all_from_list(text, self.patterns))
-        if others:
-            # Key must match SessionState's LIST_SLOTS/ALLOWED_SLOTS name ('other',
-            # singular) -- 'others' is not a recognized slot and was silently
-            # unusable downstream.
-            scored['other'] = self._scored_entry(others, 0.6, 'others_bucket')
-
-        overlap = (self.colors & self.materials) | (self.colors & self.brands)
-        for slot in ('color', 'material', 'brand'):
-            entry = scored.get(slot)
-            if entry and str(entry['value']).lower() in overlap:
-                entry['confidence'] = 0.4
-                entry['source'] = 'ambiguous_overlap'
-
-        return scored
-
+        structured_constraints = []
+        text_lower = text.lower()
+        
+        # Try each constraint extraction pattern
+        for pattern, category in self.compiled_constraint_patterns:
+            for match in pattern.finditer(text_lower):
+                if category == 'other':
+                    # For generic patterns, check if the key is a known constraint type
+                    key = match.group(1).strip()
+                    value = match.group(2).strip()
+                    
+                    # Map common keys to constraint categories
+                    key_mapping = {
+                        'material': 'material',
+                        'fabric': 'material',
+                        'made of': 'material',
+                        'color': 'color',
+                        'colour': 'color',
+                        'size': 'size',
+                        'sizing': 'size',
+                        'brand': 'brand',
+                        'make': 'brand',
+                        'style': 'style',
+                        'type': 'style',
+                        'kind': 'style',
+                        'price': 'budget',
+                        'budget': 'budget',
+                        'cost': 'budget',
+                        'feature': 'feature',
+                        'features': 'feature',
+                        'with': 'feature',
+                        'category': 'category',
+                        'type of': 'category',
+                    }
+                    
+                    if key in key_mapping:
+                        mapped_category = key_mapping[key]
+                        structured_constraints.append(f"{mapped_category}: {value}")
+                    else:
+                        # For unknown keys, just add as generic
+                        structured_constraints.append(f"{key}: {value}")
+                else:
+                    # For specific patterns, extract the value
+                    value = match.group(1).strip()
+                    structured_constraints.append(f"{category}: {value}")
+        
+        # Also check for patterns without explicit key phrases
+        # For example, "must be material: chromium" or "it must be chromium"
+        must_be_patterns = [
+            (r'(?:must|should|needs to|has to)\s+be\s+(?:made of\s+)?([^,.]+)', 'material'),
+            (r'(?:must|should|needs to|has to)\s+be\s+([^,.]+)', 'other'),
+        ]
+        
+        for pattern, category in must_be_patterns:
+            for match in re.finditer(pattern, text_lower):
+                value = match.group(1).strip()
+                if category == 'material':
+                    # Check if the value is a known material
+                    if value in self.materials:
+                        structured_constraints.append(f"material: {value}")
+                else:
+                    # Check if the value matches any known constraint type
+                    value_lower = value.lower()
+                    if value_lower in self.materials:
+                        structured_constraints.append(f"material: {value}")
+                    elif value_lower in self.colors:
+                        structured_constraints.append(f"color: {value}")
+                    elif value_lower in self.brands:
+                        structured_constraints.append(f"brand: {value}")
+                    elif value_lower in self.style:
+                        structured_constraints.append(f"style: {value}")
+        
+        return structured_constraints
+    
     def extract_constraints(self, user_input: str) -> Dict[str, Union[str, List[str]]]:
         """
         Extract specific constraints from user input.
         Modified: 'category', 'material', 'color', 'size', 'style', 'brand' 
         now return single values (first match only).
+        Key phrases like "key considerations are:" are placed under 'others'.
         
         Args:
             user_input: The user's search query or message
@@ -643,8 +639,88 @@ class IntentClassifier:
             Dictionary of extracted constraints with normalized values
             Single-value constraints return strings, multi-value return lists
         """
-        scored = self.extract_constraints_scored(user_input)
-        return {key: entry['value'] for key, entry in scored.items()}
+        text = user_input.strip()
+        constraints = {}
+        
+        # Extract category with pluralization handling - NOW SINGLE VALUE
+        categories = self._extract_categories(text)
+        if categories:
+            constraints['category'] = categories[0]  # Take first category only
+        
+        # Extract material - NOW SINGLE VALUE
+        materials = self._extract_all_from_list(text, self.materials)
+        if materials:
+            constraints['material'] = materials[0]  # Take first material only
+        
+        # Extract color - NOW SINGLE VALUE
+        colors = self._extract_all_from_list(text, self.colors)
+        if colors:
+            constraints['color'] = colors[0]  # Take first color only
+        
+        # Extract size (single value - unchanged)
+        size = self._extract_size(text)
+        if size:
+            constraints['size'] = size
+        
+        # Extract style (single value - unchanged)
+        style = self._extract_from_list(text, self.style)
+        if style:
+            constraints['style'] = style
+        
+        # Extract brand - NOW EXPLICITLY SINGLE VALUE
+        brand = self._extract_from_list(text, self.brands)
+        if brand:
+            constraints['brand'] = brand
+        
+        # Extract budget (hard constraint - specific amount)
+        budget = self._extract_budget(text)
+        if budget:
+            constraints['budget'] = budget
+        
+        # Extract features (MULTIPLE features still supported)
+        features = self._extract_all_from_list(text, self.features)
+        if features:
+            constraints['feature'] = features[0] if len(features) == 1 else features
+        
+        # Extract others (genders, fits, conditions, patterns combined)
+        others = []
+        
+        # Extract genders (can be multiple)
+        genders = self._extract_all_from_list(text, self.genders)
+        if genders:
+            others.extend(genders)
+        
+        # Extract fits (can be multiple)
+        fits = self._extract_all_from_list(text, self.fits)
+        if fits:
+            others.extend(fits)
+        
+        # Extract conditions (can be multiple)
+        conditions = self._extract_all_from_list(text, self.conditions)
+        if conditions:
+            others.extend(conditions)
+        
+        # Extract patterns (can be multiple)
+        patterns = self._extract_all_from_list(text, self.patterns)
+        if patterns:
+            others.extend(patterns)
+        
+        # Extract key phrase constraints (NEW)
+        key_phrase_constraints = self._extract_key_phrase_constraints(text)
+        if key_phrase_constraints:
+            # Add key phrase constraints to others list
+            others.extend(key_phrase_constraints)
+        
+        # Add others to constraints if any found
+        if others:
+            # Remove duplicates while preserving order
+            unique_others = []
+            for other in others:
+                if other not in unique_others:
+                    unique_others.append(other)
+            constraints['others'] = unique_others
+        
+        return constraints
     
     def classify_intent(self, user_input: str) -> str:
         """
@@ -781,12 +857,12 @@ class IntentClassifier:
                 r'without\s+(?:the\s+)?features?\b',
             ],
             'others': [
-                r'remove\s+(?:the\s+)?(?:gender|fit|condition|pattern)s?\s+(?:requirement|constraint|filter|restriction)',
-                r'remove\s+(?:the\s+)?(?:gender|fit|condition|pattern)s?\b',
-                r'drop\s+(?:the\s+)?(?:gender|fit|condition|pattern)s?\s+(?:requirement|constraint|filter|restriction)',
-                r'drop\s+(?:the\s+)?(?:gender|fit|condition|pattern)s?\b',
-                r'without\s+(?:the\s+)?(?:gender|fit|condition|pattern)s?\s+(?:requirement|constraint|filter|restriction)',
-                r'without\s+(?:the\s+)?(?:gender|fit|condition|pattern)s?\b',
+                r'remove\s+(?:the\s+)?(?:gender|fit|condition|pattern|key)s?\s+(?:requirement|constraint|filter|restriction)',
+                r'remove\s+(?:the\s+)?(?:gender|fit|condition|pattern|key)s?\b',
+                r'drop\s+(?:the\s+)?(?:gender|fit|condition|pattern|key)s?\s+(?:requirement|constraint|filter|restriction)',
+                r'drop\s+(?:the\s+)?(?:gender|fit|condition|pattern|key)s?\b',
+                r'without\s+(?:the\s+)?(?:gender|fit|condition|pattern|key)s?\s+(?:requirement|constraint|filter|restriction)',
+                r'without\s+(?:the\s+)?(?:gender|fit|condition|pattern|key)s?\b',
             ],
         }
         
@@ -803,6 +879,10 @@ class IntentClassifier:
             values_to_check = value if isinstance(value, list) else [value]
             
             for val in values_to_check:
+                # Skip key phrase prefixed values for removal checking
+                if val.startswith('key:'):
+                    continue
+                    
                 # Check if this specific value is being negated
                 is_negated = False
                 
@@ -1009,5 +1089,5 @@ class IntentClassifier:
                     resolved_constraints[category] = value
         
         return resolved_constraints
-
+    
 #hello
