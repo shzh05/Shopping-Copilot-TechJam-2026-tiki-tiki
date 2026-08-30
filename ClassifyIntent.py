@@ -29,8 +29,8 @@ class IntentClassifier:
         self.materials: Set[str] = {
             'cotton', 'polyester', 'wool', 'silk', 'leather', 'denim', 'linen',
             'nylon', 'spandex', 'cashmere', 'velvet', 'suede', 'flannel', 'fleece',
-            'canvas', 'mesh', 'satin', 'lace', 'chiffon', 'tweed', 'corduroy', 'stainless steel', 'sterling silver',
-            'platinum', 'gold', 'silver'
+            'canvas', 'mesh', 'satin', 'lace', 'chiffon', 'tweed', 'corduroy', 
+            'stainless steel', 'sterling silver', 'platinum', 'gold', 'silver'
         }
         
         # Pattern/print terms
@@ -47,8 +47,8 @@ class IntentClassifier:
             'athletic fit', 'classic fit', 'modern fit', 'tailored', 'baggy'
         }
         
-        # Occasion/style terms
-        self.occasions: Set[str] = {
+        # Style terms (renamed from occasions)
+        self.style: Set[str] = {
             'casual', 'formal', 'business', 'party', 'wedding', 'workout',
             'athletic', 'outdoor', 'everyday', 'dressy', 'professional',
             'vacation', 'beach', 'winter', 'summer', 'spring', 'fall'
@@ -60,13 +60,61 @@ class IntentClassifier:
             'unisex', 'toddler', 'infant', 'baby', 'youth', 'adult', 'children'
         }
         
-        # Product categories
+        # Product categories - store both singular and plural forms where applicable
         self.categories: Set[str] = {
-            'shirt', 'pants', 'shoes', 'jacket', 'dress', 'skirt', 'shorts',
-            'sweater', 'hoodie', 't-shirt', 'jeans', 'socks', 'hat', 'cap',
-            'scarf', 'gloves', 'belt', 'watch', 'bag', 'backpack', 'sunglasses',
-            'boots', 'sandals', 'sneakers', 'heels', 'suit', 'blazer', 'coat',
-            'swimsuit', 'underwear', 'bra', 'leggings', 'cardigan', 'vest', 'earrings', 'rings', 'stud', 'necklace', 'chain'
+            'shirt', 'pants', 'shoes', 'jacket', 'jackets', 'dress', 
+            'skirt', 'shorts', 'sweater', 'hoodie', 
+            't-shirt', 'jeans', 'socks', 'hat', 'cap',
+            'scarf', 'gloves', 'belt', 'watch',
+            'bag', 'backpack', 'sunglasses', 'boots', 'sandals', 
+            'sneakers', 'heels', 'suit', 'blazer', 'coat',
+            'swimsuit', 'underwear', 'bra', 'leggings', 
+            'cardigan', 'cardigans', 'vest', 'earrings', 'ring', 'studs', 
+            'necklace', 'chain',
+        }
+        
+        # Define singular-to-plural mapping for special cases
+        self.singular_to_plural = {
+            'shirt': 'shirts',
+            'scarf': 'scarves',
+            'dress': 'dresses',
+            'skirt': 'skirts',
+            'sweater': 'sweaters',
+            'hoodie': 'hoodies',
+            't-shirt': 't-shirts',
+            'hat': 'hats',
+            'cap': 'caps',
+            'glove': 'gloves',
+            'belt': 'belts',
+            'watch': 'watches',
+            'bag': 'bags',
+            'backpack': 'backpacks',
+            'boot': 'boots',
+            'sandal': 'sandals',
+            'sneaker': 'sneakers',
+            'heel': 'heels',
+            'suit': 'suits',
+            'blazer': 'blazers',
+            'coat': 'coats',
+            'swimsuit': 'swimsuits',
+            'bra': 'bras',
+            'legging': 'leggings',
+            'cardigan': 'cardigans',
+            'vest': 'vests',
+            'earring': 'earrings',
+            'ring': 'rings',
+            'necklace': 'necklaces',
+            'chain': 'chains',
+        }
+        
+        # Define plural-to-singular mapping (reverse of above, for normalization)
+        self.plural_to_singular = {v: k for k, v in self.singular_to_plural.items()}
+        
+        # Words that are inherently plural (should not be singularized)
+        self.inherently_plural = {
+            'pants', 'jeans', 'shorts', 'leggings', 'sunglasses', 
+            'earrings', 'studs', 'socks', 'shoes', 'boots', 'sandals',
+            'sneakers', 'heels', 'gloves'
         }
         
         # Condition terms
@@ -114,27 +162,10 @@ class IntentClassifier:
             'extra large': 'XL', 'extra small': 'XS', '3XL': 'XXXL', '2XL': 'XXL'
         }
         
-        # Qualitative price indicators (not hard constraints)
-        self.price_qualifiers = {
-            'cheap': 'budget',
-            'affordable': 'budget',
-            'budget': 'budget',
-            'inexpensive': 'budget',
-            'expensive': 'premium',
-            'premium': 'premium',
-            'luxury': 'luxury',
-            'high-end': 'luxury',
-            'high end': 'luxury',
-            'reasonable': 'mid-range',
-            'moderate': 'mid-range',
-            'mid-range': 'mid-range',
-            'mid range': 'mid-range'
-        }
-        
         # Compile regex patterns
         self._compile_patterns()
     
-    def _compile_patterns(self):#"""Pre-compile regex patterns for efficiency."""
+    def _compile_patterns(self):
         """Pre-compile regex patterns for efficiency."""
         # Numeric price patterns with capture groups (hard constraints)
         self.price_patterns = [
@@ -167,22 +198,8 @@ class IntentClassifier:
             (r'\bregular\b', lambda m: "regular"),
             (r'\bshort\b', lambda m: "short"),
             # Add pattern for standalone numeric sizes (e.g., "size 10" without "size" keyword)
-            (r'\b(\d{1,2}(?:\.\d+)?)\b', 
-             lambda m: m.group(1) if 4 <= float(m.group(1)) <= 22 else None)
-        ]
-        
-        # Rating patterns with capture groups
-        self.rating_patterns = [
-            (r'\b(?:rated|rating|stars|star)\s+(\d+(?:\.\d+)?)\b', 
-             lambda m: f"{m.group(1)} stars"),
-            (r'\b(\d+(?:\.\d+)?)\s+stars?\b', 
-             lambda m: f"{m.group(1)} stars"),
-            (r'\b(\d+(?:\.\d+)?)\s*/\s*5\b', 
-             lambda m: f"{m.group(1)}/5"),
-            (r'\bhighly\s+rated\b', lambda m: ">4.0 stars"),
-            (r'\btop\s+rated\b', lambda m: ">4.5 stars"),
-            (r'\bbest\s+seller\b', lambda m: "bestseller"),
-            (r'\bbestseller\b', lambda m: "bestseller")
+            (r'(?<!\$)(?<!\b\d)(?<![\d.])(\d{1,2}(?:\.\d+)?)(?![\d.])(?!\s*(?:dollars|bucks|USD))', 
+            lambda m: m.group(1) if 4 <= float(m.group(1)) <= 22 else None)
         ]
     
     def _normalize_size(self, size: str) -> str:
@@ -199,7 +216,7 @@ class IntentClassifier:
         except ValueError:
             return size.upper()
     
-    def _extract_measurement(self, match) -> str:#"""Extract measurement with unit."""
+    def _extract_measurement(self, match) -> str:
         """Extract measurement with unit."""
         number = match.group(1)
         # Determine the unit from the match
@@ -209,46 +226,153 @@ class IntentClassifier:
                 return f"{number} {unit}"
         return number
     
-    def _extract_price(self, text: str) -> Optional[str]:
+    def _singularize(self, word: str) -> str:
         """
-        Extract price constraint from text.
-        Only returns hard price constraints (specific amounts).
-        Qualitative terms are handled separately.
+        Convert a plural word to its singular form using rules and mappings.
+        Handles special cases and avoids singularizing inherently plural words.
         """
-        # Try numeric patterns first
-        for pattern, formatter in self.price_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                return formatter(match)
-        return None
+        word_lower = word.lower().strip()
+        
+        # Don't singularize inherently plural words
+        if word_lower in self.inherently_plural:
+            return word_lower
+        
+        # Check if we have a direct mapping
+        if word_lower in self.plural_to_singular:
+            return self.plural_to_singular[word_lower]
+        
+        # Apply standard pluralization rules
+        # Rule 1: Words ending in 'ies' → 'y' (e.g., "parties" → "party")
+        if word_lower.endswith('ies') and len(word_lower) > 3:
+            return word_lower[:-3] + 'y'
+        
+        # Rule 2: Words ending in 'ves' → 'f' or 'fe' (e.g., "scarves" → "scarf", "knives" → "knife")
+        if word_lower.endswith('ves') and len(word_lower) > 3:
+            # Try 'f' first (scarf → scarves)
+            candidate_f = word_lower[:-3] + 'f'
+            # Try 'fe' (knife → knives)
+            candidate_fe = word_lower[:-3] + 'fe'
+            
+            # Check if either candidate is in our categories
+            if candidate_f in self.categories:
+                return candidate_f
+            if candidate_fe in self.categories:
+                return candidate_fe
+            
+            # Default to 'f' for common cases
+            return candidate_f
+        
+        # Rule 3: Words ending in 'es' → remove 'es' (e.g., "dresses" → "dress", "boxes" → "box")
+        if word_lower.endswith('es') and len(word_lower) > 3:
+            candidate = word_lower[:-2]
+            if candidate in self.categories:
+                return candidate
+            # Also check without 'e' (e.g., "watches" → "watch")
+            candidate2 = word_lower[:-1]
+            if candidate2 in self.categories:
+                return candidate2
+        
+        # Rule 4: Words ending in 's' → remove 's' (e.g., "shirts" → "shirt", "hats" → "hat")
+        if word_lower.endswith('s') and not word_lower.endswith('ss') and len(word_lower) > 2:
+            candidate = word_lower[:-1]
+            if candidate in self.categories:
+                return candidate
+        
+        # If no rule applies, return the original word
+        return word_lower
     
-    def _extract_price_qualifier(self, text: str) -> Optional[str]:
+    def _normalize_category(self, word: str) -> str:
         """
-        Extract qualitative price indicators (budget, premium, luxury).
-        These are not hard constraints but indicate price range preference.
+        Normalize a category word to its canonical form.
+        Returns the singular form if the word is a known plural, 
+        or the original word if it's inherently plural or already singular.
         """
-        text_lower = text.lower()
-        for term, category in self.price_qualifiers.items():
-            if re.search(rf'\b{re.escape(term)}\b', text_lower):
-                return category
-        return None
+        word_lower = word.lower().strip()
+        
+        # If it's already in our categories, return as-is
+        if word_lower in self.categories:
+            return word_lower
+        
+        # Check if it's inherently plural
+        if word_lower in self.inherently_plural:
+            return word_lower
+        
+        # Try to singularize it
+        singular_form = self._singularize(word_lower)
+        
+        # If the singular form is in our categories, return it
+        if singular_form in self.categories:
+            return singular_form
+        
+        # If we can't normalize it, return the original
+        return word_lower
+    
+    def _extract_budget(self, text: str) -> Optional[str]:
+        """
+        Extract budget constraint from text.
+        If multiple prices are found, returns the higher value.
+        """
+        prices = []
+        
+        # Try numeric patterns to find all prices
+        for pattern, formatter in self.price_patterns:
+            matches = re.finditer(pattern, text, re.IGNORECASE)
+            for match in matches:
+                formatted = formatter(match)
+                prices.append(formatted)
+        
+        if not prices:
+            return None
+        
+        # If multiple prices found, extract numeric values and get the higher one
+        if len(prices) > 1:
+            numeric_values = []
+            for price in prices:
+                # Extract numeric values from formatted string
+                numbers = re.findall(r'\d+(?:\.\d+)?', price)
+                for num in numbers:
+                    numeric_values.append(float(num))
+            
+            if numeric_values:
+                max_price = max(numeric_values)
+                # Format back to string with proper formatting
+                if max_price == int(max_price):
+                    return f"${int(max_price)}"
+                else:
+                    return f"${max_price:.2f}"
+        
+        # Return the single price if only one found
+        return prices[0]
     
     def _extract_size(self, text: str) -> Optional[str]:
         """Extract size constraint from text."""
+        # First, identify and mask all price-related numbers
+        price_indicators = [r'\$\s*\d+(?:\.\d+)?', r'\d+(?:\.\d+)?\s*(?:dollars|bucks|USD)']
+        masked_text = text
+        
+        for price_pattern in price_indicators:
+            masked_text = re.sub(price_pattern, '', masked_text, flags=re.IGNORECASE)
+        
+        # Check for "regular fit" pattern first to avoid misclassification
+        if re.search(r'\bregular\s+fit\b', masked_text, re.IGNORECASE):
+            # Remove "regular" from size patterns temporarily
+            for pattern, formatter in self.size_patterns:
+                if pattern == r'\bregular\b':
+                    continue
+                match = re.search(pattern, masked_text, re.IGNORECASE)
+                if match:
+                    result = formatter(match)
+                    if result:
+                        return result
+            return None
+        
+        # Now extract size from the masked text (prices removed)
         for pattern, formatter in self.size_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
+            match = re.search(pattern, masked_text, re.IGNORECASE)
             if match:
                 result = formatter(match)
-                if result:  # Only return if formatter returns a non-None value
+                if result:
                     return result
-        return None
-    
-    def _extract_rating(self, text: str) -> Optional[str]:
-        """Extract rating constraint from text."""
-        for pattern, formatter in self.rating_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                return formatter(match)
         return None
     
     def _extract_from_list(self, text: str, word_list: Set[str]) -> Optional[str]:
@@ -281,11 +405,43 @@ class IntentClassifier:
             return filtered_matches
         
         return matches
-    #Dictionary of extracted constraints with normalized values; Single-value constraints return strings, multi-value return lists
-    def extract_constraints(self, user_input: str) -> Dict[str, Union[str, List[str]]]:#this is the function that uses all prev funct
+    
+    def _extract_categories(self, text: str) -> List[str]:
+        """
+        Extract categories with pluralization handling.
+        Returns normalized (singular) category names.
+        """
+        text_lower = text.lower()
+        text_words = re.findall(r'\b[\w\-\']+\b', text_lower)
+        
+        found_categories = []
+        
+        # First, check for multi-word categories (like "t-shirt")
+        for category in self.categories:
+            if ' ' in category or '-' in category:
+                if re.search(rf'\b{re.escape(category)}\b', text_lower):
+                    found_categories.append(category)
+        
+        # Then check individual words
+        for word in text_words:
+            # Try to normalize the word to a category
+            normalized = self._normalize_category(word)
+            if normalized in self.categories and normalized not in found_categories:
+                found_categories.append(normalized)
+        
+        # Remove duplicates while preserving order
+        unique_categories = []
+        for cat in found_categories:
+            if cat not in unique_categories:
+                unique_categories.append(cat)
+        
+        return unique_categories
+    
+    def extract_constraints(self, user_input: str) -> Dict[str, Union[str, List[str]]]:
         """
         Extract specific constraints from user input.
-        Supports multiple features and multi-value constraints.
+        Modified: 'category', 'material', 'color', 'size', 'style', 'brand' 
+        now return single values (first match only).
         
         Args:
             user_input: The user's search query or message
@@ -297,79 +453,75 @@ class IntentClassifier:
         text = user_input.strip()
         constraints = {}
         
-        # Extract price (hard constraint - specific amount)
-        price = self._extract_price(text)
-        if price:
-            constraints['price'] = price
+        # Extract category with pluralization handling - NOW SINGLE VALUE
+        categories = self._extract_categories(text)
+        if categories:
+            constraints['category'] = categories[0]  # Take first category only
         
-        # Extract price qualifier (soft constraint - qualitative)
-        price_qualifier = self._extract_price_qualifier(text)
-        if price_qualifier and 'price' not in constraints:
-            # Only add if no hard price constraint exists
-            constraints['price_range'] = price_qualifier
+        # Extract material - NOW SINGLE VALUE
+        materials = self._extract_all_from_list(text, self.materials)
+        if materials:
+            constraints['material'] = materials[0]  # Take first material only
         
-        # Extract size (single value)
+        # Extract color - NOW SINGLE VALUE
+        colors = self._extract_all_from_list(text, self.colors)
+        if colors:
+            constraints['color'] = colors[0]  # Take first color only
+        
+        # Extract size (single value - unchanged)
         size = self._extract_size(text)
         if size:
             constraints['size'] = size
         
-        # Extract color (can be multiple - e.g., "red and blue")
-        colors = self._extract_all_from_list(text, self.colors)
-        if colors:
-            constraints['color'] = colors[0] if len(colors) == 1 else colors
+        # Extract style (single value - unchanged)
+        style = self._extract_from_list(text, self.style)
+        if style:
+            constraints['style'] = style
         
-        # Extract brand (single value typically)
+        # Extract brand - NOW EXPLICITLY SINGLE VALUE
         brand = self._extract_from_list(text, self.brands)
         if brand:
             constraints['brand'] = brand
         
-        # Extract material (can be multiple)
-        materials = self._extract_all_from_list(text, self.materials)
-        if materials:
-            constraints['material'] = materials[0] if len(materials) == 1 else materials
+        # Extract budget (hard constraint - specific amount)
+        budget = self._extract_budget(text)
+        if budget:
+            constraints['budget'] = budget
         
-        # Extract pattern (single value typically)
-        pattern = self._extract_from_list(text, self.patterns)
-        if pattern:
-            constraints['pattern'] = pattern
-        
-        # Extract fit (single value)
-        fit = self._extract_from_list(text, self.fits)
-        if fit:
-            constraints['fit'] = fit
-        
-        # Extract occasion (single value)
-        occasion = self._extract_from_list(text, self.occasions)
-        if occasion:
-            constraints['occasion'] = occasion
-        
-        # Extract gender (single value)
-        gender = self._extract_from_list(text, self.genders)
-        if gender:
-            constraints['gender'] = gender
-        
-        # Extract category (can be multiple in some cases)
-        categories = self._extract_all_from_list(text, self.categories)
-        if categories:
-            constraints['category'] = categories[0] if len(categories) == 1 else categories
-        
-        # Extract condition (single value)
-        condition = self._extract_from_list(text, self.conditions)
-        if condition:
-            constraints['condition'] = condition
-        
-        # Extract features (MULTIPLE features supported)
+        # Extract features (MULTIPLE features still supported)
         features = self._extract_all_from_list(text, self.features)
         if features:
             constraints['feature'] = features[0] if len(features) == 1 else features
         
-        # Extract rating (single value)
-        rating = self._extract_rating(text)
-        if rating:
-            constraints['rating'] = rating
+        # Extract others (genders, fits, conditions, patterns combined)
+        others = []
+        
+        # Extract genders (can be multiple)
+        genders = self._extract_all_from_list(text, self.genders)
+        if genders:
+            others.extend(genders)
+        
+        # Extract fits (can be multiple)
+        fits = self._extract_all_from_list(text, self.fits)
+        if fits:
+            others.extend(fits)
+        
+        # Extract conditions (can be multiple)
+        conditions = self._extract_all_from_list(text, self.conditions)
+        if conditions:
+            others.extend(conditions)
+        
+        # Extract patterns (can be multiple)
+        patterns = self._extract_all_from_list(text, self.patterns)
+        if patterns:
+            others.extend(patterns)
+        
+        # Add others to constraints if any found
+        if others:
+            constraints['others'] = others
         
         return constraints
-    #Classify user intent as 'Buying' or 'Browsing' based on constraint >= 1
+    
     def classify_intent(self, user_input: str) -> str:
         """
         Classify user intent as 'Buying' or 'Browsing' based on constraint density.
@@ -382,16 +534,15 @@ class IntentClassifier:
         """
         constraints = self.extract_constraints(user_input)
         
-        # Count hard constraint categories (exclude soft qualifiers)
-        hard_constraints = {k: v for k, v in constraints.items() 
-                           if k not in ['price_range']}
+        # Count hard constraint categories (all constraints are hard now)
+        hard_constraints = constraints
         
         # Determine intent based on hard constraint count
         if len(hard_constraints) >= 2:
             return "Buying"
         else:
             return "Browsing"
-    # returns Dictionary with intent, constraint count, and extracted constraints
+    
     def classify_with_details(self, user_input: str) -> Dict[str, Any]:
         """
         Enhanced classification that returns intent along with extracted constraints.
@@ -401,9 +552,8 @@ class IntentClassifier:
         """
         constraints = self.extract_constraints(user_input)
         
-        # Count hard constraints (exclude soft qualifiers)
-        hard_constraints = {k: v for k, v in constraints.items() 
-                           if k not in ['price_range']}
+        # Count hard constraints (all constraints are hard now)
+        hard_constraints = constraints
         
         intent = "Buying" if len(hard_constraints) >= 2 else "Browsing"
         
@@ -419,20 +569,19 @@ class IntentClassifier:
             "intent": intent,
             "constraint_count": len(hard_constraints),  # Number of hard constraint categories
             "total_constraint_values": total_values,  # Total including multiple features
-            "constraints": constraints,  # All constraints including soft qualifiers
+            "constraints": constraints,  # All constraints
             "hard_constraints": hard_constraints,  # Only hard constraints
             "query": user_input
         }
     
-    def get_constraint_categories(self) -> List[str]:#"""Return list of all supported constraint categories."""
+    def get_constraint_categories(self) -> List[str]:
         """Return list of all supported constraint categories."""
         return [
-            'price', 'price_range', 'size', 'color', 'brand', 'material', 
-            'pattern', 'fit', 'occasion', 'gender', 'category', 'condition',
-            'feature', 'rating'
+            'category', 'material', 'color', 'size', 'style', 
+            'brand', 'budget', 'feature', 'others'
         ]
     
-    def get_feature_list(self) -> List[str]:#"""Return the complete list of supported features."""
+    def get_feature_list(self) -> List[str]:
         """Return the complete list of supported features."""
         return sorted(self.features)
     
@@ -455,7 +604,7 @@ class IntentClassifier:
         # Identify constraints to remove based on negation
         constraints_to_remove = set()
         
-        # NEW: Check for category-level removals (e.g., "remove the size requirement")
+        # Check for category-level removals
         category_removal_patterns = {
             'size': [
                 r'remove\s+(?:the\s+)?size\s+(?:requirement|constraint|filter|restriction)',
@@ -483,13 +632,13 @@ class IntentClassifier:
                 r'without\s+(?:the\s+)?brand\s+(?:requirement|constraint|filter|restriction)',
                 r'without\s+(?:the\s+)?brand\b',
             ],
-            'price': [
-                r'remove\s+(?:the\s+)?price\s+(?:requirement|constraint|filter|restriction)',
-                r'remove\s+(?:the\s+)?price\b',
-                r'drop\s+(?:the\s+)?price\s+(?:requirement|constraint|filter|restriction)',
-                r'drop\s+(?:the\s+)?price\b',
-                r'without\s+(?:the\s+)?price\s+(?:requirement|constraint|filter|restriction)',
-                r'without\s+(?:the\s+)?price\b',
+            'budget': [
+                r'remove\s+(?:the\s+)?(?:price|budget)\s+(?:requirement|constraint|filter|restriction)',
+                r'remove\s+(?:the\s+)?(?:price|budget)\b',
+                r'drop\s+(?:the\s+)?(?:price|budget)\s+(?:requirement|constraint|filter|restriction)',
+                r'drop\s+(?:the\s+)?(?:price|budget)\b',
+                r'without\s+(?:the\s+)?(?:price|budget)\s+(?:requirement|constraint|filter|restriction)',
+                r'without\s+(?:the\s+)?(?:price|budget)\b',
             ],
             'category': [
                 r'remove\s+(?:the\s+)?categor(?:y|ies)\s+(?:requirement|constraint|filter|restriction)',
@@ -499,7 +648,6 @@ class IntentClassifier:
                 r'without\s+(?:the\s+)?categor(?:y|ies)\s+(?:requirement|constraint|filter|restriction)',
                 r'without\s+(?:the\s+)?categor(?:y|ies)\b',
             ],
-            # Add other categories as needed
             'feature': [
                 r'remove\s+(?:the\s+)?features?\s+(?:requirement|constraint|filter|restriction)',
                 r'remove\s+(?:the\s+)?features?\b',
@@ -507,6 +655,14 @@ class IntentClassifier:
                 r'drop\s+(?:the\s+)?features?\b',
                 r'without\s+(?:the\s+)?features?\s+(?:requirement|constraint|filter|restriction)',
                 r'without\s+(?:the\s+)?features?\b',
+            ],
+            'others': [
+                r'remove\s+(?:the\s+)?(?:gender|fit|condition|pattern)s?\s+(?:requirement|constraint|filter|restriction)',
+                r'remove\s+(?:the\s+)?(?:gender|fit|condition|pattern)s?\b',
+                r'drop\s+(?:the\s+)?(?:gender|fit|condition|pattern)s?\s+(?:requirement|constraint|filter|restriction)',
+                r'drop\s+(?:the\s+)?(?:gender|fit|condition|pattern)s?\b',
+                r'without\s+(?:the\s+)?(?:gender|fit|condition|pattern)s?\s+(?:requirement|constraint|filter|restriction)',
+                r'without\s+(?:the\s+)?(?:gender|fit|condition|pattern)s?\b',
             ],
         }
         
@@ -517,7 +673,7 @@ class IntentClassifier:
                     constraints_to_remove.add(category)
                     break
         
-        # Check each constraint category for removal (existing logic)
+        # Check each constraint category for removal
         for category, value in original_constraints.items():
             # Get the actual values to check for negation
             values_to_check = value if isinstance(value, list) else [value]
@@ -535,21 +691,13 @@ class IntentClassifier:
                 for negation_phrase in negation_phrases:
                     # More flexible patterns to catch various negation forms
                     patterns = [
-                        # Pattern: "does not need to be waterproof"
                         rf'{negation_phrase}\s+(?:need\s+to\s+be|have\s+to\s+be|be|have|need|require)\s+{re.escape(val)}',
-                        # Pattern: "not waterproof"
                         rf'{negation_phrase}\s+{re.escape(val)}',
-                        # Pattern: "no longer waterproof"
                         rf'{negation_phrase}\s+{re.escape(val)}',
-                        # Pattern: "remove waterproof"
                         rf'remove\s+(?:the\s+)?{re.escape(val)}',
-                        # Pattern: "drop waterproof"
                         rf'drop\s+(?:the\s+)?{re.escape(val)}',
-                        # Pattern: "without waterproof"
                         rf'without\s+(?:the\s+)?{re.escape(val)}',
-                        # Pattern: "does not need waterproof"
                         rf'{negation_phrase}\s+(?:need|require|want)\s+(?:to\s+be\s+|the\s+)?{re.escape(val)}',
-                        # More generic: "does not ... waterproof"
                         rf'{negation_phrase}[\w\s]{{0,20}}{re.escape(val)}'
                     ]
                     
@@ -565,6 +713,9 @@ class IntentClassifier:
                     if category == 'feature':
                         # For features, track specific feature to remove
                         constraints_to_remove.add(f'feature:{val}')
+                    elif category == 'others':
+                        # For others, track specific value to remove
+                        constraints_to_remove.add(f'others:{val}')
                     else:
                         # For other categories, remove entire category
                         constraints_to_remove.add(category)
@@ -587,12 +738,26 @@ class IntentClassifier:
                             resolved_constraints['feature'] = current_features
                     elif current_features == feature_to_remove:
                         del resolved_constraints['feature']
+            elif removal.startswith('others:'):
+                # Remove specific value from others
+                value_to_remove = removal.split(':', 1)[1]
+                if 'others' in resolved_constraints:
+                    current_others = resolved_constraints['others']
+                    if isinstance(current_others, list):
+                        current_others = [v for v in current_others if v != value_to_remove]
+                        if len(current_others) == 0:
+                            del resolved_constraints['others']
+                        elif len(current_others) == 1:
+                            resolved_constraints['others'] = current_others[0]
+                        else:
+                            resolved_constraints['others'] = current_others
+                    elif current_others == value_to_remove:
+                        del resolved_constraints['others']
             else:
                 # Remove entire category
                 if removal in resolved_constraints:
                     del resolved_constraints[removal]
         
-        # Rest of the method remains the same...
         # Update/add constraints from new query (excluding those being removed)
         for category, value in new_constraints.items():
             if category not in constraints_to_remove:
@@ -628,7 +793,6 @@ class IntentClassifier:
                             resolved_constraints['feature'] = merged_features
                     else:
                         # No existing features, just add the new ones
-                        # But skip features marked for removal
                         if isinstance(value, list):
                             filtered_features = []
                             for feature in value:
@@ -653,9 +817,64 @@ class IntentClassifier:
                                     break
                             if not should_remove:
                                 resolved_constraints['feature'] = value
+                elif category == 'others':
+                    # Special handling for others (merge lists)
+                    if 'others' in resolved_constraints:
+                        existing_others = resolved_constraints['others']
+                        if isinstance(existing_others, str):
+                            existing_others = [existing_others]
+                        
+                        new_others = value if isinstance(value, list) else [value]
+                        
+                        # Merge others, but skip those marked for removal
+                        merged_others = existing_others.copy()
+                        for other in new_others:
+                            if other not in merged_others:
+                                # Check if this value should be removed
+                                should_remove = False
+                                for removal in constraints_to_remove:
+                                    if removal.startswith('others:') and removal.split(':', 1)[1] == other:
+                                        should_remove = True
+                                        break
+                                if not should_remove:
+                                    merged_others.append(other)
+                        
+                        # Set the final others value
+                        if len(merged_others) == 0:
+                            if 'others' in resolved_constraints:
+                                del resolved_constraints['others']
+                        elif len(merged_others) == 1:
+                            resolved_constraints['others'] = merged_others[0]
+                        else:
+                            resolved_constraints['others'] = merged_others
+                    else:
+                        # No existing others, just add the new ones
+                        if isinstance(value, list):
+                            filtered_others = []
+                            for other in value:
+                                should_remove = False
+                                for removal in constraints_to_remove:
+                                    if removal.startswith('others:') and removal.split(':', 1)[1] == other:
+                                        should_remove = True
+                                        break
+                                if not should_remove:
+                                    filtered_others.append(other)
+                            if filtered_others:
+                                if len(filtered_others) == 1:
+                                    resolved_constraints['others'] = filtered_others[0]
+                                else:
+                                    resolved_constraints['others'] = filtered_others
+                        else:
+                            # Check if this single value should be removed
+                            should_remove = False
+                            for removal in constraints_to_remove:
+                                if removal.startswith('others:') and removal.split(':', 1)[1] == value:
+                                    should_remove = True
+                                    break
+                            if not should_remove:
+                                resolved_constraints['others'] = value
                 elif category == 'category':
                     # Special handling for category - replace, don't merge
-                    # Take the most specific category (longest match)
                     if isinstance(value, list):
                         # If multiple categories found, prefer the most specific one
                         resolved_constraints['category'] = max(value, key=len)
@@ -667,19 +886,4 @@ class IntentClassifier:
         
         return resolved_constraints
 
-#test your own queries
-'''
-if __name__ == "__main__":
-    classifier = IntentClassifier()
-    query = input("What would you like to search for? ")
-    print("Enhanced Intent Classification with Price Qualifiers:")
-    print("=" * 80)
-        
-
-    result = classifier.classify_with_details(query)
-    print(f"\nQuery: '{query}'")
-    print(f"Intent: {result['intent']}")
-    print(f"Hard Constraint Categories: {result['constraint_count']}")
-    print(f"Extracted Constraints: {result['constraints']}")
-    print("-" * 80)
-'''
+#hello
