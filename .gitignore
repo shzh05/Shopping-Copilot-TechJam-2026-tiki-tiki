@@ -2,3 +2,5 @@ data/catalog.jsonl
 .env
 .venv
 test.py
+__pycache__
+validation/

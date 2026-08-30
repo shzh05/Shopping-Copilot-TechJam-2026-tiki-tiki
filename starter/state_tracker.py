@@ -2,11 +2,62 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any, Callable
 
-from starter.session_state import ALLOWED_SLOTS, SessionState
+from ClassifyIntent import IntentClassifier
+from starter.session_state import ALLOWED_SLOTS, LIST_SLOTS, SessionState
+from dotenv import load_dotenv
+
+load_dotenv()
+
+_CLASSIFIER = IntentClassifier()
+HIGH_CONFIDENCE = 0.8
+AUTO_SLOTS = frozenset(
+    {
+        "category", "material", "color", "size", "style", "brand", "budget",
+        "feature", "use_case", "other",
+    }
+)
+TOKEN_RE = re.compile(r"[a-z0-9$]+", re.IGNORECASE)
+RESIDUAL_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from",
+    "i", "in", "is", "it", "me", "my", "of", "on", "or", "please", "some",
+    "that", "the", "this", "to", "want", "with", "would", "you", "looking",
+    "need", "get", "find", "show", "like", "id", "im", "under", "over", "than",
+    "less", "more", "below", "above", "between", "bucks", "dollars", "usd",
+    "size", "sz", "wanting", "looking", "please", "can", "could", "a", "am",
+    # Boilerplate framing words used by prompts like "A key requirement is:",
+    # "For that, what matters is:", "I don't have an additional preference
+    # for X." -- these carry no constraint content of their own, so they
+    # shouldn't count as "residual" content that forces an LLM call.
+    "don", "dont", "doesn", "doesnt", "have", "additional", "preference",
+    "preferences", "key", "requirement", "requirements", "matters", "what",
+    "there", "no", "none", "any", "sure", "just", "well", "so", "also",
+    "actually", "ignore", "earlier", "instead", "rather", "prefer",
+    # Slot names themselves -- "I don't have a preference for style" names
+    # the attribute being asked about, which isn't itself residual content.
+    "category", "color", "material", "size", "style", "brand", "budget",
+    "feature", "use_case", "other", "use", "case",
+}
+MESSY_RE = re.compile(
+    r"\b(not|without|don't|dont|do not|doesn't|doesnt|remove|forget|instead|"
+    r"no longer|no preference|don't care|dont care|anything|either)\b",
+    re.IGNORECASE,
+)
+PIVOT_RE = re.compile(
+    r"\b(actually looking for|switch to|something else)\b",
+    re.IGNORECASE,
+)
 
 SLOT_ENUM = sorted(ALLOWED_SLOTS)
+
+# Slots that are inherently free text. budget and size are excluded here --
+# they legitimately take numeric/short-token values ("100", "32", "10.5").
+TEXTUAL_SLOTS = frozenset(
+    {"category", "material", "color", "style", "brand", "feature", "use_case", "other"}
+)
+NUMERIC_ONLY_RE = re.compile(r"^\$?\d+(\.\d+)?$")
 
 TOOLS: list[dict[str, Any]] = [
     {
@@ -23,13 +74,15 @@ TOOLS: list[dict[str, Any]] = [
             "name": "set_slot",
             "description": (
                 "Accumulate a new constraint. Fails if a scalar slot already has a different value; "
-                "use update_slot to rewrite."
+                "use update_slot to rewrite. Always pass the actual descriptive text the user used "
+                "(e.g. 'alloy', 'stainless steel') -- never a bare number or placeholder id, even for "
+                "budget (pass it as a numeric string like '100')."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "enum": SLOT_ENUM},
-                    "value": {"type": ["string", "integer"]},
+                    "value": {"type": "string"},
                 },
                 "required": ["name", "value"],
                 "additionalProperties": False,
@@ -40,12 +93,15 @@ TOOLS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "update_slot",
-            "description": "Intent override: overwrite a slot (for example color red -> blue).",
+            "description": (
+                "Intent override: overwrite a slot (for example color red -> blue). Always pass the "
+                "actual descriptive text the user used -- never a bare number or placeholder id."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "enum": SLOT_ENUM},
-                    "value": {"type": ["string", "integer"]},
+                    "value": {"type": "string"},
                 },
                 "required": ["name", "value"],
                 "additionalProperties": False,
@@ -61,7 +117,7 @@ TOOLS: list[dict[str, Any]] = [
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "enum": SLOT_ENUM},
-                    "value": {"type": ["string", "integer", "null"]},
+                    "value": {"type": ["string", "null"]},
                 },
                 "required": ["name"],
                 "additionalProperties": False,
@@ -103,13 +159,16 @@ TOOLS: list[dict[str, Any]] = [
 ]
 
 SYSTEM_PROMPT = """You are a shopping slot tracker for one conversation.
-Call tools to update SessionState. Do not invent constraints the user did not state.
+A rule-based classifier already applied high-confidence slots. You only rectify
+what the classifier could not handle. Do not invent constraints the user did not state.
 Rules:
+- Do not re-set slots listed as already applied unless the user is clearly correcting them.
 - New information that does not conflict: set_slot (accumulation). Prior slots must remain.
 - Contradiction, replacement, or "instead": update_slot (rewrite) or clear_slot then set_slot.
 - "Forget X" / "ignore my earlier preference": clear_slot or update_slot for only the obsolete keys.
 - Completely different product type: reset_slots, then set_slot for the new search.
 - "I don't have a preference for {attribute}": mark_unspecified.
+- Unmapped classifier "others" (gender, fit, pattern, condition) may belong in style, use_case, or other.
 - budget is a numeric max price (under $100 -> 100).
 Never dump a full JSON state as the final answer; tools are the source of truth.
 After tools have been applied, reply with a short confirmation only."""
@@ -123,6 +182,154 @@ def _parse_arguments(raw: str | None) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _values_for_strip(value: Any) -> list[str]:
+    items = value if isinstance(value, list) else [value]
+    phrases: list[str] = []
+    for item in items:
+        text = str(item).strip().lower()
+        if not text:
+            continue
+        phrases.append(text)
+        phrases.extend(TOKEN_RE.findall(text))
+        digits = re.findall(r"\d+", text)
+        phrases.extend(digits)
+    return phrases
+
+
+def _residual_intent(user_message: str, scored: dict[str, dict[str, Any]]) -> bool:
+    remaining = user_message.lower()
+    phrases: list[str] = []
+    for entry in scored.values():
+        phrases.extend(_values_for_strip(entry.get("value")))
+    phrases = sorted(set(phrases), key=len, reverse=True)
+    for phrase in phrases:
+        if not phrase:
+            continue
+        remaining = re.sub(rf"\b{re.escape(phrase)}\b", " ", remaining)
+        remaining = remaining.replace(phrase, " ")
+    leftover = [
+        token
+        for token in TOKEN_RE.findall(remaining)
+        if len(token) > 1 and token.lower() not in RESIDUAL_STOPWORDS and not token.isdigit()
+    ]
+    return bool(leftover)
+
+
+def _is_first_turn(session: SessionState, turn: int) -> bool:
+    """True when this is the first user turn of a session."""
+    return turn == 1 or not session.history
+
+
+def _low_confidence_slots(
+    scored: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Return only classifier results that need LLM/tool interpretation."""
+    return {
+        name: entry
+        for name, entry in scored.items()
+        if float(entry.get("confidence") or 0.0) < HIGH_CONFIDENCE
+    }
+
+
+def _needs_llm(user_message: str, scored: dict[str, dict[str, Any]]) -> bool:
+    """The LLM is used when the classifier is low-confidence about something
+    it extracted, OR when the message still has meaningful content the
+    classifier didn't extract anything for at all (free-text answers to
+    open-ended attributes like feature/use_case/other typically fall in the
+    second bucket, since they rarely hit the vocab lists)."""
+    if _low_confidence_slots(scored):
+        return True
+    return _residual_intent(user_message, scored)
+
+
+def _apply_high_confidence(
+    session: SessionState,
+    scored: dict[str, dict[str, Any]],
+    turn: int,
+) -> list[str]:
+    """Apply high-confidence classifier results locally, without the LLM."""
+    applied: list[str] = []
+
+    for name, entry in scored.items():
+        if name not in AUTO_SLOTS:
+            continue
+        if float(entry.get("confidence") or 0) < HIGH_CONFIDENCE:
+            continue
+
+        value = entry.get("value")
+        values = value if name in LIST_SLOTS and isinstance(value, list) else [value]
+
+        for item in values:
+            current = session.slots.get(name)
+
+            if name in LIST_SLOTS or current in (None, "", []):
+                result = dispatch(
+                    session,
+                    "set_slot",
+                    {"name": name, "value": item},
+                    turn,
+                )
+            elif str(current).lower() == str(item).lower() or (
+                name == "budget"
+                and isinstance(current, int)
+                and str(current) in str(item)
+            ):
+                applied.append(name)
+                continue
+            else:
+                # High-confidence correction can be handled deterministically.
+                result = dispatch(
+                    session,
+                    "update_slot",
+                    {"name": name, "value": item},
+                    turn,
+                )
+
+            if result.get("ok"):
+                applied.append(name)
+
+    return list(dict.fromkeys(applied))
+
+
+def _rejection_reason(slot_name: str, value: Any, user_message: str) -> str | None:
+    """Sanity-check an LLM-proposed set_slot/update_slot value before it is trusted.
+
+    Guards against two observed tool-calling failure modes on the free-text
+    slots (material, feature, category, ...): the model emitting a bare
+    digit/placeholder id instead of the real text (e.g. "81" instead of
+    "alloy"), and the model inventing a value with no basis in what the user
+    actually said this turn. budget/size are exempt since numeric values are
+    legitimate there.
+    """
+    if slot_name not in TEXTUAL_SLOTS:
+        return None
+
+    items = value if isinstance(value, list) else [value]
+    haystack = user_message.lower()
+
+    for item in items:
+        if isinstance(item, bool):
+            continue
+        if isinstance(item, (int, float)):
+            return f"{slot_name} must be descriptive text, not a bare number ({item!r})"
+
+        text = str(item).strip()
+        if not text:
+            continue
+        if NUMERIC_ONLY_RE.match(text):
+            return f"{slot_name} must be descriptive text, not a bare number ({text!r})"
+
+        words = [w for w in TOKEN_RE.findall(text.lower()) if len(w) > 2]
+        if words:
+            hits = sum(1 for word in words if word in haystack)
+            if hits / len(words) < 0.5:
+                return (
+                    f"{slot_name} value {text!r} doesn't appear in the user's message; "
+                    "use the user's own wording"
+                )
+    return None
 
 
 def dispatch(session: SessionState, name: str, arguments: dict[str, Any], turn: int) -> dict[str, Any]:
@@ -148,7 +355,6 @@ def _usage_from(payload: Any) -> tuple[int, int]:
     completion = int(getattr(usage, "completion_tokens", 0) or 0) if usage is not None else 0
     return max(0, prompt), max(0, completion)
 
-
 def track(
     session: SessionState,
     user_message: str,
@@ -159,15 +365,54 @@ def track(
     model: str | None = None,
     max_rounds: int = 4,
 ) -> dict[str, int]:
-    """Run the Groq/OpenAI tool loop against session. Returns token usage."""
+    """Classifier-first state tracking with confidence-gated LLM fallback.
+
+    The rule-based IntentClassifier always runs first. Any slot it extracted
+    at >= HIGH_CONFIDENCE is applied locally via _apply_high_confidence --
+    no LLM call. The Groq/OpenAI tool loop is invoked when either (a) a slot
+    came back below HIGH_CONFIDENCE, or (b) the message has meaningful
+    content the classifier didn't extract anything for at all (free-text
+    answers to open-ended attributes like feature/use_case/other). In either
+    case the LLM is given just the low-confidence residual (plus what was
+    already applied, plus which attribute was most recently asked) as
+    context, not the full message re-interpreted from scratch.
+    """
+
+    scored = _CLASSIFIER.extract_constraints_scored(user_message)
+    low_confidence = _low_confidence_slots(scored)
+    applied = _apply_high_confidence(session, scored, turn)
+    pending_attribute = getattr(session, "pending_attribute", None)
+
+    # Neither low-confidence extraction nor unexplained residual content =>
+    # classifier alone is sufficient, no LLM.
+    if not _needs_llm(user_message, scored):
+        print("Not Using LLM")
+        return {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "llm_called": False,
+            "classifier": scored,
+            "low_confidence": {},
+            "applied": applied,
+        }
+
+    # Low-confidence and/or unexplained residual content: run the tool loop.
+    print("Using LLM")
     prompt_tokens = 0
     completion_tokens = 0
     completer = create
     if completer is None:
         api_key = os.environ.get("GROQ_API_KEY", "").strip()
-        print(api_key if api_key else "No API KEY FOUND", user_message)
         if not api_key:
-            return {"prompt_tokens": 0, "completion_tokens": 0, "Reason": "No API KEY FOUND"}
+            return {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "llm_called": False,
+                "classifier": scored,
+                "low_confidence": low_confidence,
+                "applied": applied,
+                "reason": "No API KEY FOUND",
+            }
         if client is None:
             try:
                 from openai import OpenAI
@@ -178,16 +423,40 @@ def track(
 
     chosen_model = model or os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
     snapshot = json.dumps(session.snapshot(), ensure_ascii=True)
+    classifier_json = json.dumps(low_confidence, ensure_ascii=True)
+    applied_json = json.dumps(applied, ensure_ascii=True)
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "system", "content": f"Current slots: {snapshot}"},
+        {
+            "role": "system",
+            "content": (
+                f"Low-confidence classifier extraction (value/confidence/source): {classifier_json}. "
+                f"Already applied locally: {applied_json}. "
+                "Only call tools for residual or ambiguous constraints."
+            ),
+        },
     ]
+    if pending_attribute:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    f"You most recently asked the user about '{pending_attribute}'. "
+                    "If the message doesn't clearly state a value for a different slot, "
+                    "treat it as the user's answer to that attribute: call set_slot for "
+                    f"'{pending_attribute}' if they gave a value (use their own wording), "
+                    f"or mark_unspecified for '{pending_attribute}' if they said they have "
+                    "no preference. Don't drop a real answer just because it doesn't match "
+                    "a known vocabulary term."
+                ),
+            }
+        )
     if session.last_assistant_message:
         messages.append({"role": "assistant", "content": session.last_assistant_message})
     messages.append({"role": "user", "content": user_message})
 
     for _ in range(max_rounds):
-        print("messages", messages)
         response = completer(
             model=chosen_model,
             messages=messages,
@@ -203,9 +472,6 @@ def track(
             text = getattr(choice, "content", None)
             if isinstance(text, str) and text.strip():
                 session.last_assistant_message = text.strip()
-                print("\n=== ASSISTANT OUTPUT ===")
-                print(text.strip())
-                print("========================\n")
             break
         messages.append(
             {
@@ -225,21 +491,19 @@ def track(
             }
         )
         for call in tool_calls:
-            print("\n=== TOOL CALL ===")
-            print("Tool:", call.function.name)
-            print("Arguments:", call.function.arguments)
-            print("=================\n")
 
-            result = dispatch(
-                session,
-                call.function.name,
-                _parse_arguments(call.function.arguments),
-                turn
-            )
+            call_args = _parse_arguments(call.function.arguments)
 
-            print("=== TOOL RESULT ===")
-            print(result)
-            print("==================\n")
+            rejection = None
+            if call.function.name in ("set_slot", "update_slot"):
+                rejection = _rejection_reason(
+                    call_args.get("name", ""), call_args.get("value"), user_message
+                )
+
+            if rejection:
+                result = {"ok": False, "error": rejection, **session.snapshot()}
+            else:
+                result = dispatch(session, call.function.name, call_args, turn)
 
             messages.append(
                 {
@@ -249,9 +513,11 @@ def track(
                 }
             )
 
-    print("\n=== RAW RESPONSE ===")
-    print(response)
-    print("====================\n")
-
-
-    return {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens}
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "llm_called": True,
+        "classifier": scored,
+        "low_confidence": low_confidence,
+        "applied": applied,
+    }

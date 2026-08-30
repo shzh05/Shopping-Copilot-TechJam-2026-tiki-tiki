@@ -309,17 +309,24 @@ class Agent:
         session = self._sessions.get(session_id)
         if session is None:
             raise RuntimeError("reset must be called before respond")
-        # usage = track(session, user_message, turn)
         
+        print(user_message, turn)
+        usage = track(session, user_message, turn)
+
+        print(session.slots)
+
         recommendations = self._search(session, user_message, top_k)
         ask_attribute = self._select_ask_attribute(session, user_message)
-        # message = session.last_assistant_message or "Here are the closest matches I found."
-        message = "Here are the closest matches I found."
+        session.pending_attribute = ask_attribute
+
+        print(ask_attribute)
+        message = session.last_assistant_message or "Here are the closest matches I found."
         return {
             "message": message,
-            # "ask_attribute": session.next_ask_attribute(),
             "ask_attribute": ask_attribute,
             "recommendations": recommendations,
-            # "usage": usage,
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0}
+            "usage": {
+                "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+                "completion_tokens": int(usage.get("completion_tokens") or 0),
+            },
         }

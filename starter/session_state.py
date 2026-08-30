@@ -62,6 +62,11 @@ class SessionState:
         self.history: list[dict[str, Any]] = []
         self.last_assistant_message: str | None = None
         self.asked: set[str] = set()
+        # The attribute most recently asked about (set by the caller after
+        # choosing the next question). Read by state_tracker.track() on the
+        # *next* turn so it knows what an ambiguous free-text reply is most
+        # likely answering, instead of guessing from phrasing alone.
+        self.pending_attribute: str | None = None
 
     def asked_attributes(self) -> set():
         return self.asked
