@@ -67,7 +67,6 @@ class SessionState:
         # *next* turn so it knows what an ambiguous free-text reply is most
         # likely answering, instead of guessing from phrasing alone.
         self.pending_attribute: str | None = None
-        self.rejected_asins: list[str] = []
 
     def asked_attributes(self) -> set():
         return self.asked
