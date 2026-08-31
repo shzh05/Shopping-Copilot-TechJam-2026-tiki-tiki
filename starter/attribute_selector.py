@@ -69,9 +69,9 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from ClassifyIntent import IntentClassifier
+from ClassifyIntent import get_shared_classifier
 
-_CLASSIFIER = IntentClassifier()
+_CLASSIFIER = get_shared_classifier()
 
 SLOT_ATTRIBUTES = [
     "category", "material", "color", "size", "style", "brand",
@@ -196,6 +196,16 @@ _SIZE_TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Catalog products are immutable during evaluation. Cache their flattened
+# text and extracted slot values because the same products are examined on
+# many turns while choosing clarification questions.
+_TEXT_CACHE: dict[str, str] = {}
+_VALUE_CACHE: dict[tuple[str, str], list[str]] = {}
+
+
+def _product_key(product: dict) -> str:
+    return str(product.get("parent_asin") or id(product))
+
 
 #Splits price into categories for the budget slot
 # Bucket ceilings in USD; the final bucket is open-ended ("$100+").
@@ -223,6 +233,11 @@ def _price_bucket(price: float) -> str:
 
 def _product_text(product: dict) -> str:
     """Flatten a catalog product's text fields into one lowercase blob."""
+    key = _product_key(product)
+    cached = _TEXT_CACHE.get(key)
+    if cached is not None:
+        return cached
+
     parts: list[str] = []
     for field in ("title", "features", "description", "categories", "store"):
         value = product.get(field)
@@ -233,22 +248,41 @@ def _product_text(product: dict) -> str:
     details = product.get("details")
     if isinstance(details, dict):
         parts.extend(f"{k} {v}" for k, v in details.items())
-    return " ".join(parts).lower()
+    result = " ".join(parts).lower()
+    _TEXT_CACHE[key] = result
+    return result
 
 def _values_for_slot(slot: str, product: dict, text: str) -> list[str]:
     """Every distinct (normalized) value this product exposes for `slot`."""
+    key = (_product_key(product), slot)
+    cached = _VALUE_CACHE.get(key)
+    if cached is not None:
+        return cached
+
     if slot == "budget":
         price = _parse_price(product.get("price"))
-        return [] if price is None else [_price_bucket(price)]
+        result = [] if price is None else [_price_bucket(price)]
+        _VALUE_CACHE[key] = result
+        return result
     if slot == "size":
         tokens = {m.group(1).lower() for m in _SIZE_TOKEN_RE.finditer(text)}
-        return sorted({_normalize_size_value(t) for t in tokens})
+        result = sorted({_normalize_size_value(t) for t in tokens})
+        _VALUE_CACHE[key] = result
+        return result
     found: set[str] = set()
     for vocab in _SLOT_VOCAB.get(slot, []):
         for word in vocab:
-            if re.search(rf"\b{re.escape(word)}\b", text):
+            # This function is called for many products and many turns.
+            # Plain normalized substring checks are substantially cheaper
+            # than compiling/running a regex for every catalog vocabulary
+            # entry.  Phrase vocabularies are only used as a rough proxy for
+            # choosing a question, so occasional boundary ambiguity is
+            # acceptable here; final ranking still uses the agent's matcher.
+            if word in text:
                 found.add(word)
-    return sorted(found)
+    result = sorted(found)
+    _VALUE_CACHE[key] = result
+    return result
 
 
 # --------------------------------------------------------------------------

@@ -1,6 +1,9 @@
 import json
 import re
 from typing import List, Set, Dict, Optional, Any, Tuple, Union
+from collections import Counter
+from pathlib import Path
+from functools import lru_cache
 
 # ---------------------------------------------------------------------------
 # Freeform-keyword helpers (new).
@@ -46,11 +49,25 @@ class IntentClassifier:
     Supports multiple features and multi-value constraints.
     """
     
-    def __init__(self):
+    def __init__(self, catalog_path: str | Path = "data/catalog.jsonl"):
         """Rule-based extraction using hand-typed lexicons only. `category`
         and `brand` are matched against the small hardcoded
         `self.categories`/`self.brands` lists below — no catalog file is
         read or consulted."""
+        # Extract vocabulary from catalog
+        self.catalog_path = Path(catalog_path)
+
+        # Keep the hand-written vocabularies separate from terms discovered
+        # in the catalog.  The classifier's existing normalization logic
+        # continues to use self.categories/self.brands, while the separate
+        # sets let us identify catalog-derived matches and confidence sources.
+        self.categories: Set[str] = set()
+        self.brands: Set[str] = set()
+        self.catalog_categories: Set[str] = set()
+        self.catalog_brands: Set[str] = set()
+
+        self._load_catalog_vocab()
+
         # Static color list (common e-commerce colors)
         self.colors: Set[str] = {
             'black', 'white', 'red', 'blue', 'green', 'yellow', 'purple', 'pink',
@@ -105,7 +122,7 @@ class IntentClassifier:
             'men', 'women', 'mens', 'womens', 'boys', 'girls', 'kids',
             'unisex', 'toddler', 'infant', 'baby', 'youth', 'adult', 'children'
         }
-        
+
         # Product categories - store both singular and plural forms where applicable
         self.categories: Set[str] = {
             'shirt', 'pants', 'shoes', 'jacket', 'jackets', 'dress', 
@@ -211,6 +228,76 @@ class IntentClassifier:
         
         # Compile regex patterns
         self._compile_patterns()
+
+    def _load_catalog_vocab(self) -> None:
+        category_counts = Counter()
+        brand_counts = Counter()
+
+        if not self.catalog_path.exists():
+            return
+
+        with self.catalog_path.open(encoding="utf-8") as handle:
+            for line in handle:
+                product = json.loads(line)
+
+                categories = product.get("categories") or []
+                if categories:
+                    category = str(categories[-1]).strip().lower()
+                    if self._valid_catalog_term(category):
+                        category_counts[category] += 1
+
+                store = product.get("store")
+                if store:
+                    brand = str(store).strip().lower()
+                    if self._valid_catalog_term(brand):
+                        brand_counts[brand] += 1
+
+        # Ignore one-off noisy values.
+        self.catalog_categories = {
+            value
+            for value, count in category_counts.items()
+            if count >= 5
+        }
+
+        self.catalog_brands = {
+            value
+            for value, count in brand_counts.items()
+            if count >= 2
+        }
+
+        # Extend the original vocabularies instead of replacing them.
+        self.categories.update(self.catalog_categories)
+        self.brands.update(self.catalog_brands)
+
+    @staticmethod
+    def _valid_catalog_term(value: str) -> bool:
+        if len(value) < 3 or len(value) > 50:
+            return False
+
+        junk_words = {
+            "test", "sale", "deal", "discount", "clearance",
+            "coupon", "promo", "pricing", "customers",
+        }
+
+        junk_symbols = {"$", "%", "|", ":"}
+
+        if any(symbol in value for symbol in junk_symbols):
+            return False
+
+        if any(word in value.split() for word in junk_words):
+            return False
+
+        return True
+
+    def _match_catalog_phrase(self, text: str, terms: set[str]) -> str | None:
+        normalized = re.sub(r"[^a-z0-9\s-]", " ", text.lower())
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+
+        for term in sorted(terms, key=len, reverse=True):
+            if re.search(rf"\b{re.escape(term)}\b", normalized):
+                return term
+
+        return None
 
     def _compile_patterns(self):
         """Pre-compile regex patterns for efficiency."""
@@ -432,9 +519,13 @@ class IntentClassifier:
         return None
     
     def _extract_brand(self, text: str) -> Tuple[Optional[str], str]:
-        """Returns (brand_or_None, source). Matches against the hardcoded
-        self.brands list only."""
-        return self._extract_from_list(text, self.brands), 'vocab'
+        """Return (brand_or_None, source), preferring catalog brands."""
+        catalog_brand = self._match_catalog_phrase(text, self.catalog_brands)
+        if catalog_brand:
+            return catalog_brand, "catalog"
+
+        brand = self._extract_from_list(text, self.brands)
+        return brand, "vocab" if brand else "none"
 
     def _extract_from_list(self, text: str, word_list: Set[str]) -> Optional[str]:
         """Extract the first matched word from the list that appears in text."""
@@ -469,33 +560,41 @@ class IntentClassifier:
     
     def _extract_categories(self, text: str) -> List[str]:
         """
-        Extract categories with pluralization handling.
-        Returns normalized (singular) category names.
+        Extract categories using both the original hardcoded vocabulary
+        and catalog-derived categories.
         """
         text_lower = text.lower()
-        text_words = re.findall(r'\b[\w\-\']+\b', text_lower)
-        
+        text_words = re.findall(r"\b[\w'-]+\b", text_lower)
         found_categories = []
-        
-        # First, check for multi-word categories (like "t-shirt")
+
+        # Prefer the longest catalog phrase, e.g. "fashion sneakers"
+        # instead of the more general "sneakers".
+        catalog_category = self._match_catalog_phrase(
+            text_lower,
+            self.catalog_categories,
+        )
+        if catalog_category:
+            found_categories.append(catalog_category)
+
+        # Existing multi-word category logic
         for category in self.categories:
-            if ' ' in category or '-' in category:
-                if re.search(rf'\b{re.escape(category)}\b', text_lower):
+            if " " in category or "-" in category:
+                if re.search(rf"\b{re.escape(category)}\b", text_lower):
                     found_categories.append(category)
-        
-        # Then check individual words
+
+        # Existing single-word normalization logic
         for word in text_words:
-            # Try to normalize the word to a category
             normalized = self._normalize_category(word)
+
             if normalized in self.categories and normalized not in found_categories:
                 found_categories.append(normalized)
-        
+
         # Remove duplicates while preserving order
         unique_categories = []
-        for cat in found_categories:
-            if cat not in unique_categories:
-                unique_categories.append(cat)
-        
+        for category in found_categories:
+            if category not in unique_categories:
+                unique_categories.append(category)
+
         return unique_categories
 
     def _extract_categories_scored(self, text: str) -> List[Tuple[str, float, str]]:
@@ -513,6 +612,15 @@ class IntentClassifier:
                 return
             seen.add(name)
             scored.append((name, confidence, source))
+
+        # Prefer a specific catalog-derived phrase over a generic category
+        # match.  For example, "fashion sneakers" should beat "sneakers".
+        catalog_category = self._match_catalog_phrase(
+            text_lower,
+            self.catalog_categories,
+        )
+        if catalog_category:
+            _add(catalog_category, 0.95, 'catalog')
 
         for category in self.categories:
             if ' ' in category or '-' in category:
@@ -1155,50 +1263,12 @@ class IntentClassifier:
         return resolved_constraints
 
 
-# ---------------------------------------------------------------------------
-# Interactive CLI for manually testing extraction.
-#
-# Run this file directly (`python ClassifyIntent-3-2.py`) and type a query
-# at the prompt. For each input it prints:
-#   - extract_constraints()         -> the plain constraint dict
-#   - extract_constraints_scored()  -> same, but with confidence/source per value
-#   - extract_keywords()            -> leftover freeform terms not captured above
-#   - classify_with_details()       -> intent classification + constraint summary
-#
-# Type 'quit' or 'exit' (or Ctrl+D / Ctrl+C) to stop.
-# ---------------------------------------------------------------------------
-if __name__ == "__main__":
-    classifier = IntentClassifier()
+@lru_cache(maxsize=1)
+def get_shared_classifier() -> IntentClassifier:
+    """Return the single classifier shared by state_tracker and attribute_selector.
 
-    print("IntentClassifier interactive test. Type a query and press Enter.")
-    print("Type 'quit' or 'exit' to stop.\n")
-
-    while True:
-        try:
-            user_input = input(">> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\nExiting.")
-            break
-
-        if not user_input:
-            continue
-        if user_input.lower() in ("quit", "exit"):
-            break
-
-        constraints = classifier.extract_constraints(user_input)
-        scored = classifier.extract_constraints_scored(user_input)
-        keywords = classifier.extract_keywords(user_input, constraints=constraints)
-        details = classifier.classify_with_details(user_input)
-
-        print("\n--- extract_constraints() ---")
-        print(json.dumps(constraints, indent=2))
-
-        print("\n--- extract_constraints_scored() ---")
-        print(json.dumps(scored, indent=2))
-
-        print("\n--- extract_keywords() (leftover terms) ---")
-        print(json.dumps(keywords, indent=2))
-
-        print("\n--- classify_with_details() ---")
-        print(json.dumps(details, indent=2))
-        print()
+    The catalog vocabulary is built once per process.  This keeps the
+    existing classifier implementation intact while avoiding a second
+    50k-product catalog scan during module imports.
+    """
+    return IntentClassifier("data/catalog.jsonl")

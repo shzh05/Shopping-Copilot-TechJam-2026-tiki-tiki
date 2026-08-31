@@ -5,13 +5,13 @@ import os
 import re
 from typing import Any, Callable
 
-from ClassifyIntent import IntentClassifier
+from ClassifyIntent import get_shared_classifier
 from starter.session_state import ALLOWED_SLOTS, LIST_SLOTS, SessionState
 from dotenv import load_dotenv
 
 load_dotenv()
 
-_CLASSIFIER = IntentClassifier()
+_CLASSIFIER = get_shared_classifier()
 HIGH_CONFIDENCE = 0.8
 AUTO_SLOTS = frozenset(
     {
@@ -244,6 +244,35 @@ def _needs_llm(user_message: str, scored: dict[str, dict[str, Any]]) -> bool:
     return _residual_intent(user_message, scored)
 
 
+def _remember_freeform_terms(
+    session: SessionState,
+    user_message: str,
+    scored: dict[str, dict[str, Any]],
+) -> None:
+    """Keep useful unmatched terms for later retrieval without duplicating
+    the existing structured-slot extraction."""
+    remaining = user_message.lower()
+    phrases: list[str] = []
+    for entry in scored.values():
+        phrases.extend(_values_for_strip(entry.get("value")))
+    for phrase in sorted(set(phrases), key=len, reverse=True):
+        remaining = re.sub(rf"\b{re.escape(phrase)}\b", " ", remaining)
+        remaining = remaining.replace(phrase, " ")
+
+    for token in TOKEN_RE.findall(remaining):
+        token = token.lower()
+        if (
+            len(token) > 1
+            and not token.isdigit()
+            and token not in RESIDUAL_STOPWORDS
+            and token not in session.freeform_terms
+        ):
+            session.freeform_terms.append(token)
+
+    # Bound memory; ten turns do not need an unlimited query.
+    del session.freeform_terms[:-60]
+
+
 def _apply_high_confidence(
     session: SessionState,
     scored: dict[str, dict[str, Any]],
@@ -381,12 +410,13 @@ def track(
     scored = _CLASSIFIER.extract_constraints_scored(user_message)
     low_confidence = _low_confidence_slots(scored)
     applied = _apply_high_confidence(session, scored, turn)
+    _remember_freeform_terms(session, user_message, scored)
     pending_attribute = getattr(session, "pending_attribute", None)
 
     # Neither low-confidence extraction nor unexplained residual content =>
     # classifier alone is sufficient, no LLM.
     if not _needs_llm(user_message, scored):
-        print("Not Using LLM")
+        #print("Not Using LLM")
         return {
             "prompt_tokens": 0,
             "completion_tokens": 0,
@@ -397,7 +427,7 @@ def track(
         }
 
     # Low-confidence and/or unexplained residual content: run the tool loop.
-    print("Using LLM")
+    #print("Using LLM")
     prompt_tokens = 0
     completion_tokens = 0
     completer = create

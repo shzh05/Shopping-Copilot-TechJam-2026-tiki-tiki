@@ -67,6 +67,9 @@ class SessionState:
         # *next* turn so it knows what an ambiguous free-text reply is most
         # likely answering, instead of guessing from phrasing alone.
         self.pending_attribute: str | None = None
+        # Preserve meaningful words that the classifier did not map to a
+        # structured slot; these can still improve later catalog retrieval.
+        self.freeform_terms: list[str] = []
 
     def asked_attributes(self) -> set():
         return self.asked
@@ -212,7 +215,7 @@ class SessionState:
                 terms.extend(str(item) for item in value)
             else:
                 terms.append(str(value))
-        return terms
+        return terms + self.freeform_terms
 
     def budget_limit(self) -> int | None:
         value = self.slots.get("budget")
