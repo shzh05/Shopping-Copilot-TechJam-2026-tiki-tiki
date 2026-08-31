@@ -83,6 +83,14 @@ mv catalog.jsonl data/catalog.jsonl
 ```
 
 Verify the catalog against published SHA256 checksum before running an evaluation.
+Create a .env file in the root directory of the repository:
+
+```
+GROQ_API_KEY=API_KEY
+GROQ_MODEL=MODEL_NAME
+```
+
+Add your GROQ_API_KEY and Model Name. Ensure that the model selected supports tool calling functionality such as openai/gpt-oss-120b
 
 ## Reproducing the Results
 
