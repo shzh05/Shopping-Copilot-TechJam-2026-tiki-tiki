@@ -5,25 +5,9 @@ from collections import Counter
 from pathlib import Path
 from functools import lru_cache
 
-# ---------------------------------------------------------------------------
-# Freeform-keyword helpers (new).
-#
-# ClassifyIntent previously had no equivalent of agent_addon_5's `_terms` /
-# STOPWORDS / leftover-term accumulation: any word in the user's message that
-# didn't match one of the hardcoded lexicons below was silently dropped,
-# even though it might still be useful for searching the catalog (e.g. a
-# brand fragment, a product-line name, or vocabulary this classifier's
-# lexicons just don't cover). `extract_keywords()` (see below) fills that
-# gap using the SAME general approach as agent_addon_5: tokenize, drop
-# generic stopwords, drop anything already captured by a matched
-# constraint slot, return what's left.
-#
-# Deliberately only the generic, catalog/scenario-independent stopword list
-# here — NOT agent_addon_5's extra evaluator-scaffolding stopwords (e.g.
-# "requirement", "preference", "judgment", "prioritize"), since those exist
-# specifically to strip that harness's own templated sentences and would be
-# overfitting this general-purpose classifier to one evaluator's phrasing.
-# ---------------------------------------------------------------------------
+# Free-form keyword extraction preserves useful query terms that do not match
+# one of the classifier's structured vocabularies. Only generic stopwords are
+# removed so this classifier remains independent of evaluator-specific wording.
 
 TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
 STOPWORDS: Set[str] = {
@@ -54,13 +38,11 @@ class IntentClassifier:
         and `brand` are matched against the small hardcoded
         `self.categories`/`self.brands` lists below — no catalog file is
         read or consulted."""
-        # Extract vocabulary from catalog
+        # Load catalog-derived vocabulary once during classifier construction.
         self.catalog_path = Path(catalog_path)
 
-        # Keep the hand-written vocabularies separate from terms discovered
-        # in the catalog.  The classifier's existing normalization logic
-        # continues to use self.categories/self.brands, while the separate
-        # sets let us identify catalog-derived matches and confidence sources.
+        # Keep catalog-derived terms separate from hand-written vocabularies so
+        # confidence scoring can identify where a match came from.
         self.categories: Set[str] = set()
         self.brands: Set[str] = set()
         self.catalog_categories: Set[str] = set()
@@ -68,7 +50,7 @@ class IntentClassifier:
 
         self._load_catalog_vocab()
 
-        # Static color list (common e-commerce colors)
+        # Common e-commerce colors.
         self.colors: Set[str] = {
             'black', 'white', 'red', 'blue', 'green', 'yellow', 'purple', 'pink',
             'gray', 'grey', 'brown', 'orange', 'navy', 'beige', 'tan', 'gold',
@@ -76,7 +58,7 @@ class IntentClassifier:
             'ivory', 'charcoal', 'coral', 'magenta', 'olive', 'burgundy'
         }
         
-        # Example brand names from catalog metadata (expand as needed)
+        # Seed brand names; catalog metadata extends this set below.
         self.brands: Set[str] = {
             'nike', 'adidas', 'puma', 'under armour', 'levis', "levi's",
             'calvin klein', 'tommy hilfiger', 'ralph lauren', 'zara', 'h&m',
@@ -84,46 +66,46 @@ class IntentClassifier:
             'columbia', 'carhartt', 'fruit of the loom', 'hanes', 'champion',
         }
         
-        # Material/fabric terms
+        # Material and fabric terms.
         self.materials: Set[str] = {
             'cotton', 'polyester', 'wool', 'silk', 'leather', 'denim', 'linen',
             'nylon', 'spandex', 'cashmere', 'velvet', 'suede', 'flannel', 'fleece',
             'canvas', 'mesh', 'satin', 'lace', 'chiffon', 'tweed', 'corduroy', 
             'stainless steel', 'sterling silver', 'platinum', 'gold', 'silver',
-            # Jewelry / watch materials
+            # Materials commonly used for jewelry and watches.
             'alloy', 'titanium', 'rose gold', 'gold plated', 'gold-plated',
             'copper', 'brass', 'zinc alloy', 'cubic zirconia', 'rhodium',
             'tungsten', 'ceramic', 'resin', 'acrylic',
         }
         
-        # Pattern/print terms
+        # Pattern and print terms.
         self.patterns: Set[str] = {
             'striped', 'plaid', 'floral', 'solid', 'polka dot', 'checkered',
             'printed', 'geometric', 'paisley', 'camouflage', 'animal print',
             'leopard', 'zebra', 'tie-dye', 'ombre', 'distressed', 'vintage'
         }
         
-        # Fit/silhouette terms
+        # Fit and silhouette terms.
         self.fits: Set[str] = {
             'slim fit', 'regular fit', 'relaxed fit', 'loose fit', 'skinny',
             'straight leg', 'bootcut', 'tapered', 'oversized', 'fitted',
             'athletic fit', 'classic fit', 'modern fit', 'tailored', 'baggy'
         }
         
-        # Style terms (renamed from occasions)
+        # Style and occasion terms.
         self.style: Set[str] = {
             'casual', 'formal', 'business', 'party', 'wedding', 'workout',
             'athletic', 'outdoor', 'everyday', 'dressy', 'professional',
             'vacation', 'beach', 'winter', 'summer', 'spring', 'fall'
         }
         
-        # Gender/target audience
+        # Gender and target-audience terms.
         self.genders: Set[str] = {
             'men', 'women', 'mens', 'womens', 'boys', 'girls', 'kids',
             'unisex', 'toddler', 'infant', 'baby', 'youth', 'adult', 'children'
         }
 
-        # Product categories - store both singular and plural forms where applicable
+        # Product categories, including singular and plural forms where useful.
         self.categories: Set[str] = {
             'shirt', 'pants', 'shoes', 'jacket', 'jackets', 'dress', 
             'skirt', 'shorts', 'sweater', 'hoodie', 
@@ -136,7 +118,7 @@ class IntentClassifier:
             'necklace', 'chain',
         }
         
-        # Define singular-to-plural mapping for special cases
+        # Handle irregular singular-to-plural category forms.
         self.singular_to_plural = {
             'shirt': 'shirts',
             'scarf': 'scarves',
@@ -170,63 +152,63 @@ class IntentClassifier:
             'chain': 'chains',
         }
         
-        # Define plural-to-singular mapping (reverse of above, for normalization)
+        # Build the reverse mapping for category normalization.
         self.plural_to_singular = {v: k for k, v in self.singular_to_plural.items()}
         
-        # Words that are inherently plural (should not be singularized)
+        # Plural words that should not be singularized.
         self.inherently_plural = {
             'pants', 'jeans', 'shorts', 'leggings', 'sunglasses', 
             'earrings', 'studs', 'socks', 'shoes', 'boots', 'sandals',
             'sneakers', 'heels', 'gloves'
         }
         
-        # Condition terms
+        # Product-condition terms.
         self.conditions: Set[str] = {
             'new', 'used', 'refurbished', 'like new', 'open box', 'pre-owned',
             'renewed', 'second-hand', 'second hand'
         }
         
-        # Specific features/technology - organized by category
+        # Features and technologies grouped by their intended use.
         self.features: Set[str] = {
-            # Weather/durability features
+            # Weather resistance and durability.
             'waterproof', 'water-resistant', 'weatherproof', 'windproof',
             'thermal', 'insulated', 'breathable', 'moisture-wicking',
             
-            # Sustainability features
+            # Sustainability-related features.
             'eco-friendly', 'sustainable', 'recycled', 'organic', 'biodegradable',
             'fair trade', 'vegan', 'cruelty-free', 'carbon neutral',
             
-            # Safety/protection features
+            # Safety and protection features.
             'antibacterial', 'antimicrobial', 'uv protection', 'spf',
             'flame resistant', 'fire resistant', 'safety certified',
             
-            # Comfort/convenience features
+            # Comfort and convenience features.
             'adjustable', 'detachable', 'foldable', 'portable', 'lightweight',
             'durable', 'heavy-duty', 'high-waisted', 'stretch', 'wrinkle-free',
             'easy care', 'machine washable', 'quick dry',
             
-            # Health/wellness features
+            # Health and wellness features.
             'hypoallergenic', 'ergonomic', 'orthopedic',
             'memory foam', 'gel cushioning', 'arch support',
             
-            # Material features
+            # Material-related features.
             'scratch resistant', 'shatterproof', 'rust resistant',
             'corrosion resistant', 'stain resistant', 'water repellent',
             
-            # Additional features
+            # Additional catalog features.
             'expandable', 'collapsible', 'stackable', 'modular',
             'multi-functional', 'all-in-one', 'compact', 'space saving',
             'imported'
         }
         
-        # Size mappings for normalization
+        # Normalize common size representations.
         self.size_mappings = {
             'extra small': 'XS', 'small': 'S', 'medium': 'M', 'large': 'L',
             'x-large': 'XL', 'xx-large': 'XXL', 'xxx-large': 'XXXL',
             'extra large': 'XL', 'extra small': 'XS', '3XL': 'XXXL', '2XL': 'XXL'
         }
         
-        # Compile regex patterns
+        # Compile extraction patterns once for reuse.
         self._compile_patterns()
 
     def _load_catalog_vocab(self) -> None:
@@ -252,7 +234,7 @@ class IntentClassifier:
                     if self._valid_catalog_term(brand):
                         brand_counts[brand] += 1
 
-        # Ignore one-off noisy values.
+        # Ignore values that occur too infrequently to be reliable vocabulary.
         self.catalog_categories = {
             value
             for value, count in category_counts.items()
@@ -265,7 +247,7 @@ class IntentClassifier:
             if count >= 2
         }
 
-        # Extend the original vocabularies instead of replacing them.
+        # Extend the existing vocabularies without discarding manual terms.
         self.categories.update(self.catalog_categories)
         self.brands.update(self.catalog_brands)
 
@@ -301,7 +283,7 @@ class IntentClassifier:
 
     def _compile_patterns(self):
         """Pre-compile regex patterns for efficiency."""
-        # Numeric price patterns with capture groups (hard constraints)
+        # Numeric price patterns, including their captured values.
         self.price_patterns = [
             (r'\$\s?(\d+(?:\.\d{2})?)', lambda m: f"${m.group(1)}"),
             (r'\bunder\s+\$\s?(\d+(?:\.\d{2})?)\b', lambda m: f"${m.group(1)}"),
@@ -316,7 +298,7 @@ class IntentClassifier:
             (r'\b(\d+(?:\.\d{2})?)\s+dollars\b', lambda m: f"${m.group(1)}"),
         ]
         
-        # Size patterns with capture groups
+        # Size patterns, including their captured values.
         self.size_patterns = [
             (r'\b(?:size|sz)\s+(\d+(?:\.\d+)?|xs|s|m|l|xl|xxl|xxxl)\b', 
              lambda m: self._normalize_size(m.group(1))),
@@ -331,14 +313,12 @@ class IntentClassifier:
             (r'\btall\b', lambda m: "tall"),
             (r'\bregular\b', lambda m: "regular"),
             (r'\bshort\b', lambda m: "short"),
-            # Add pattern for standalone numeric sizes (e.g., "size 10" without "size" keyword)
+            # Also recognize standalone numeric sizes such as shoe size 10.
             (r'(?<!\$)(?<!\b\d)(?<![\d.])(\d{1,2}(?:\.\d+)?)(?![\d.])(?!\s*(?:dollars|bucks|USD))', 
             lambda m: m.group(1) if 4 <= float(m.group(1)) <= 22 else None)
         ]
 
-        # Cue words that indicate a nearby bare number is a product
-        # measurement/dimension (e.g. "shaft measures approximately 8.37\"
-        # from arch") rather than a size the user is asking for.
+        # These cues distinguish product measurements from requested sizes.
         self.measurement_context_re = re.compile(
             r'\b(measures?|approximat\w*|circumference|diameter|shaft|'
             r'from\s+(?:the\s+)?(?:arch|heel|floor)|rise|drop|wingspan)\b',
@@ -350,7 +330,7 @@ class IntentClassifier:
         size_lower = size.lower().strip()
         if size_lower in self.size_mappings:
             return self.size_mappings[size_lower]
-        # Handle numeric sizes
+        # Preserve numeric sizes after normalizing their formatting.
         try:
             num = float(size_lower)
             if num.is_integer():
@@ -362,7 +342,7 @@ class IntentClassifier:
     def _extract_measurement(self, match) -> str:
         """Extract measurement with unit."""
         number = match.group(1)
-        # Determine the unit from the match
+        # Determine the measurement unit captured by the pattern.
         full_match = match.group(0).lower()
         for unit in ['inch', 'in', 'cm', 'mm', 'ft']:
             if unit in full_match:
@@ -376,52 +356,52 @@ class IntentClassifier:
         """
         word_lower = word.lower().strip()
         
-        # Don't singularize inherently plural words
+        # Leave inherently plural words unchanged.
         if word_lower in self.inherently_plural:
             return word_lower
         
-        # Check if we have a direct mapping
+        # Prefer an explicit irregular-word mapping.
         if word_lower in self.plural_to_singular:
             return self.plural_to_singular[word_lower]
         
-        # Apply standard pluralization rules
+        # Apply the fallback pluralization rules in order.
         # Rule 1: Words ending in 'ies' → 'y' (e.g., "parties" → "party")
         if word_lower.endswith('ies') and len(word_lower) > 3:
             return word_lower[:-3] + 'y'
         
         # Rule 2: Words ending in 'ves' → 'f' or 'fe' (e.g., "scarves" → "scarf", "knives" → "knife")
         if word_lower.endswith('ves') and len(word_lower) > 3:
-            # Try 'f' first (scarf → scarves)
+            # Try the common -f form first.
             candidate_f = word_lower[:-3] + 'f'
-            # Try 'fe' (knife → knives)
+            # Then try the -fe form.
             candidate_fe = word_lower[:-3] + 'fe'
             
-            # Check if either candidate is in our categories
+            # Use a candidate only when it is a known category.
             if candidate_f in self.categories:
                 return candidate_f
             if candidate_fe in self.categories:
                 return candidate_fe
             
-            # Default to 'f' for common cases
+            # Fall back to the common -f spelling.
             return candidate_f
         
-        # Rule 3: Words ending in 'es' → remove 'es' (e.g., "dresses" → "dress", "boxes" → "box")
+        # Rule 3: remove -es from regular plural forms.
         if word_lower.endswith('es') and len(word_lower) > 3:
             candidate = word_lower[:-2]
             if candidate in self.categories:
                 return candidate
-            # Also check without 'e' (e.g., "watches" → "watch")
+            # Also check the form without the preceding e.
             candidate2 = word_lower[:-1]
             if candidate2 in self.categories:
                 return candidate2
         
-        # Rule 4: Words ending in 's' → remove 's' (e.g., "shirts" → "shirt", "hats" → "hat")
+        # Rule 4: remove a trailing -s from regular plurals.
         if word_lower.endswith('s') and not word_lower.endswith('ss') and len(word_lower) > 2:
             candidate = word_lower[:-1]
             if candidate in self.categories:
                 return candidate
         
-        # If no rule applies, return the original word
+        # Keep the original word when no rule applies.
         return word_lower
     
     def _normalize_category(self, word: str) -> str:
@@ -432,22 +412,22 @@ class IntentClassifier:
         """
         word_lower = word.lower().strip()
         
-        # If it's already in our categories, return as-is
+        # Known categories are already normalized.
         if word_lower in self.categories:
             return word_lower
         
-        # Check if it's inherently plural
+        # Avoid changing categories that are inherently plural.
         if word_lower in self.inherently_plural:
             return word_lower
         
-        # Try to singularize it
+        # Try the general singularization rules.
         singular_form = self._singularize(word_lower)
         
-        # If the singular form is in our categories, return it
+        # Accept the singular only when it is a known category.
         if singular_form in self.categories:
             return singular_form
         
-        # If we can't normalize it, return the original
+        # Otherwise preserve the caller's value.
         return word_lower
     
     def _extract_budget(self, text: str) -> Optional[str]:
@@ -457,7 +437,7 @@ class IntentClassifier:
         """
         prices = []
         
-        # Try numeric patterns to find all prices
+        # Collect every price-like value found in the message.
         for pattern, formatter in self.price_patterns:
             matches = re.finditer(pattern, text, re.IGNORECASE)
             for match in matches:
@@ -467,38 +447,38 @@ class IntentClassifier:
         if not prices:
             return None
         
-        # If multiple prices found, extract numeric values and get the higher one
+        # For a range, use the higher bound as the maximum budget.
         if len(prices) > 1:
             numeric_values = []
             for price in prices:
-                # Extract numeric values from formatted string
+                # Extract numeric components from the matched text.
                 numbers = re.findall(r'\d+(?:\.\d+)?', price)
                 for num in numbers:
                     numeric_values.append(float(num))
             
             if numeric_values:
                 max_price = max(numeric_values)
-                # Format back to string with proper formatting
+                # Preserve a compact, user-readable budget value.
                 if max_price == int(max_price):
                     return f"${int(max_price)}"
                 else:
                     return f"${max_price:.2f}"
         
-        # Return the single price if only one found
+        # Return the only detected price unchanged.
         return prices[0]
     
     def _extract_size(self, text: str) -> Optional[str]:
         """Extract size constraint from text."""
-        # First, identify and mask all price-related numbers
+        # Mask price values so they are not mistaken for sizes.
         price_indicators = [r'\$\s*\d+(?:\.\d+)?', r'\d+(?:\.\d+)?\s*(?:dollars|bucks|USD)']
         masked_text = text
         
         for price_pattern in price_indicators:
             masked_text = re.sub(price_pattern, '', masked_text, flags=re.IGNORECASE)
         
-        # Check for "regular fit" pattern first to avoid misclassification
+        # Handle "regular fit" before applying generic size patterns.
         if re.search(r'\bregular\s+fit\b', masked_text, re.IGNORECASE):
-            # Remove "regular" from size patterns temporarily
+            # Temporarily remove "regular" from the text being matched.
             for pattern, formatter in self.size_patterns:
                 if pattern == r'\bregular\b':
                     continue
@@ -509,7 +489,7 @@ class IntentClassifier:
                         return result
             return None
         
-        # Now extract size from the masked text (prices removed)
+        # Extract the size from the remaining text.
         for pattern, formatter in self.size_patterns:
             match = re.search(pattern, masked_text, re.IGNORECASE)
             if match:
@@ -543,7 +523,7 @@ class IntentClassifier:
             if re.search(rf'\b{re.escape(word)}\b', text_lower):
                 matches.append(word)
         
-        # Optionally filter out words that are substrings of other matched words
+        # Optionally remove matches that are substrings of longer matches.
         if filter_substrings and len(matches) > 1:
             filtered_matches = []
             for word in matches:
@@ -567,8 +547,7 @@ class IntentClassifier:
         text_words = re.findall(r"\b[\w'-]+\b", text_lower)
         found_categories = []
 
-        # Prefer the longest catalog phrase, e.g. "fashion sneakers"
-        # instead of the more general "sneakers".
+        # Prefer the longest catalog phrase over a more general match.
         catalog_category = self._match_catalog_phrase(
             text_lower,
             self.catalog_categories,
@@ -576,20 +555,20 @@ class IntentClassifier:
         if catalog_category:
             found_categories.append(catalog_category)
 
-        # Existing multi-word category logic
+        # Apply multi-word category matching first.
         for category in self.categories:
             if " " in category or "-" in category:
                 if re.search(rf"\b{re.escape(category)}\b", text_lower):
                     found_categories.append(category)
 
-        # Existing single-word normalization logic
+        # Then normalize single-word category matches.
         for word in text_words:
             normalized = self._normalize_category(word)
 
             if normalized in self.categories and normalized not in found_categories:
                 found_categories.append(normalized)
 
-        # Remove duplicates while preserving order
+        # Remove duplicates without changing match order.
         unique_categories = []
         for category in found_categories:
             if category not in unique_categories:
@@ -613,8 +592,7 @@ class IntentClassifier:
             seen.add(name)
             scored.append((name, confidence, source))
 
-        # Prefer a specific catalog-derived phrase over a generic category
-        # match.  For example, "fashion sneakers" should beat "sneakers".
+        # Prefer a specific catalog phrase over a generic category match.
         catalog_category = self._match_catalog_phrase(
             text_lower,
             self.catalog_categories,
@@ -703,11 +681,8 @@ class IntentClassifier:
         for price_pattern in price_indicators:
             masked_text = re.sub(price_pattern, '', masked_text, flags=re.IGNORECASE)
 
-        # Also mask out percentages ("20%", "80 %") before scanning for bare
-        # numeric sizes. Without this, fabric-composition phrasing like "20%
-        # cotton, 80% polyester" gets its "20" misread as a shoe/clothing
-        # size (see also _extract_composition, which routes these into
-        # `feature` instead where they belong).
+        # Mask percentages before scanning for bare numeric sizes; otherwise
+        # fabric-composition text can be misread as a shoe or clothing size.
         masked_text = re.sub(r'\d+(?:\.\d+)?\s*%', '', masked_text)
 
         skip_regular = bool(re.search(r'\bregular\s+fit\b', masked_text, re.IGNORECASE))
@@ -805,9 +780,7 @@ class IntentClassifier:
         others.extend(self._extract_all_from_list(text, self.conditions))
         others.extend(self._extract_all_from_list(text, self.patterns))
         if others:
-            # Key must match SessionState's LIST_SLOTS/ALLOWED_SLOTS name ('other',
-            # singular) -- 'other' is not a recognized slot and was silently
-            # unusable downstream.
+            # Keep the key aligned with SessionState's singular "other" slot.
             scored['other'] = self._scored_entry(others, 0.6, 'others_bucket')
 
         overlap = (self.colors & self.materials) | (self.colors & self.brands)
@@ -868,7 +841,7 @@ class IntentClassifier:
         Returns:
             Leftover terms in first-appearance order, deduplicated. NOTE:
             this returns only THIS message's leftover terms — it has no
-            memory of earlier turns. A caller that wants agent_addon_5-style
+            memory of earlier turns. A caller that wants agent-style
             cross-turn accumulation (a running list of freeform terms that
             persists across a conversation) should collect these turn by
             turn itself, e.g.:
@@ -910,10 +883,10 @@ class IntentClassifier:
         """
         constraints = self.extract_constraints(user_input)
         
-        # Count hard constraint categories (all constraints are hard now)
+        # Count the categories containing hard constraints.
         hard_constraints = constraints
         
-        # Determine intent based on hard constraint count
+        # Infer intent from the number of extracted constraint categories.
         if len(hard_constraints) >= 2:
             return "Buying"
         else:
@@ -928,12 +901,12 @@ class IntentClassifier:
         """
         constraints = self.extract_constraints(user_input)
         
-        # Count hard constraints (all constraints are hard now)
+        # Count hard constraints and individual list values.
         hard_constraints = constraints
         
         intent = "Buying" if len(hard_constraints) >= 2 else "Browsing"
         
-        # Calculate total constraint values (counting list items)
+        # Count each item in list-valued constraints separately.
         total_values = 0
         for value in hard_constraints.values():
             if isinstance(value, list):
@@ -962,25 +935,25 @@ class IntentClassifier:
         return sorted(self.features)
     
     def resolve_query_differences(self, original_query: str, new_query: str) -> Dict[str, Union[str, List[str]]]:
-        # Extract constraints from both queries
+        # Compare the constraints extracted from both messages.
         original_constraints = self.extract_constraints(original_query)
         new_constraints = self.extract_constraints(new_query)
         
-        # Start with original constraints as the base
+        # Begin with the previous query as the state to modify.
         resolved_constraints = original_constraints.copy()
         
-        # Parse the new query to identify modifications
+        # Inspect the new message for replacements and removals.
         new_query_lower = new_query.lower()
         
-        # Check for negation patterns indicating removal of constraints
+        # Recognize language that removes an earlier constraint.
         negation_patterns = [
             r'\b(?:no longer|not|don\'t|do not|doesn\'t|does not|without|remove|drop|skip)\b'
         ]
         
-        # Identify constraints to remove based on negation
+        # Collect category or value-level removals before applying them.
         constraints_to_remove = set()
         
-        # Check for category-level removals
+        # Detect requests that remove an entire constraint category.
         category_removal_patterns = {
             'size': [
                 r'remove\s+(?:the\s+)?size\s+(?:requirement|constraint|filter|restriction)',
@@ -1042,7 +1015,7 @@ class IntentClassifier:
             ],
         }
         
-        # Check for category-level removals first
+        # Process category-level removals before value-level removals.
         for category, patterns in category_removal_patterns.items():
             for pattern in patterns:
                 if re.search(pattern, new_query_lower):
@@ -1051,21 +1024,21 @@ class IntentClassifier:
         
         # Check each constraint category for removal
         for category, value in original_constraints.items():
-            # Get the actual values to check for negation
+            # Check each stored value, including items in list-valued slots.
             values_to_check = value if isinstance(value, list) else [value]
             
             for val in values_to_check:
-                # Check if this specific value is being negated
+                # Track whether this particular value is being removed.
                 is_negated = False
                 
-                # Check for negation patterns specific to this value
+                # Test phrases that negate or remove the stored value.
                 negation_phrases = [
                     'no longer', 'not', "don't", 'do not', "doesn't", 
                     'does not', 'without', 'remove', 'drop', 'skip'
                 ]
                 
                 for negation_phrase in negation_phrases:
-                    # More flexible patterns to catch various negation forms
+                    # Cover common word orders around the negation phrase.
                     patterns = [
                         rf'{negation_phrase}\s+(?:need\s+to\s+be|have\s+to\s+be|be|have|need|require)\s+{re.escape(val)}',
                         rf'{negation_phrase}\s+{re.escape(val)}',
@@ -1087,20 +1060,20 @@ class IntentClassifier:
                 
                 if is_negated:
                     if category == 'feature':
-                        # For features, track specific feature to remove
+                        # Features can be removed individually.
                         constraints_to_remove.add(f'feature:{val}')
                     elif category == 'other':
-                        # For others, track specific value to remove
+                        # Other free-form values can also be removed individually.
                         constraints_to_remove.add(f'other:{val}')
                     else:
-                        # For other categories, remove entire category
+                        # Scalar categories are removed as a whole.
                         constraints_to_remove.add(category)
                     break
         
-        # Apply removals
+        # Apply the removals collected above.
         for removal in constraints_to_remove:
             if removal.startswith('feature:'):
-                # Remove specific feature
+                # Remove one feature while preserving other requested features.
                 feature_to_remove = removal.split(':', 1)[1]
                 if 'feature' in resolved_constraints:
                     current_features = resolved_constraints['feature']
@@ -1115,7 +1088,7 @@ class IntentClassifier:
                     elif current_features == feature_to_remove:
                         del resolved_constraints['feature']
             elif removal.startswith('other:'):
-                # Remove specific value from others
+                # Remove one free-form value while preserving the rest.
                 value_to_remove = removal.split(':', 1)[1]
                 if 'other' in resolved_constraints:
                     current_others = resolved_constraints['other']
@@ -1130,15 +1103,15 @@ class IntentClassifier:
                     elif current_others == value_to_remove:
                         del resolved_constraints['other']
             else:
-                # Remove entire category
+                # Remove a complete scalar category.
                 if removal in resolved_constraints:
                     del resolved_constraints[removal]
         
-        # Update/add constraints from new query (excluding those being removed)
+        # Add or update values from the new query after removals.
         for category, value in new_constraints.items():
             if category not in constraints_to_remove:
                 if category == 'feature':
-                    # Special handling for features (merge lists)
+                    # Merge feature values instead of replacing the list.
                     if 'feature' in resolved_constraints:
                         existing_features = resolved_constraints['feature']
                         if isinstance(existing_features, str):
@@ -1146,11 +1119,11 @@ class IntentClassifier:
                         
                         new_features = value if isinstance(value, list) else [value]
                         
-                        # Merge features, but skip those marked for removal
+                        # Preserve existing features except explicitly removed ones.
                         merged_features = existing_features.copy()
                         for feature in new_features:
                             if feature not in merged_features:
-                                # Check if this feature should be removed
+                                # Skip a feature explicitly marked for removal.
                                 should_remove = False
                                 for removal in constraints_to_remove:
                                     if removal.startswith('feature:') and removal.split(':', 1)[1] == feature:
@@ -1159,7 +1132,7 @@ class IntentClassifier:
                                 if not should_remove:
                                     merged_features.append(feature)
                         
-                        # Set the final feature value
+                        # Keep scalar output for one feature and a list for several.
                         if len(merged_features) == 0:
                             if 'feature' in resolved_constraints:
                                 del resolved_constraints['feature']
@@ -1168,7 +1141,7 @@ class IntentClassifier:
                         else:
                             resolved_constraints['feature'] = merged_features
                     else:
-                        # No existing features, just add the new ones
+                        # Add features when no previous feature value exists.
                         if isinstance(value, list):
                             filtered_features = []
                             for feature in value:
@@ -1185,7 +1158,7 @@ class IntentClassifier:
                                 else:
                                     resolved_constraints['feature'] = filtered_features
                         else:
-                            # Check if this single feature should be removed
+                            # Do not re-add a feature explicitly removed this turn.
                             should_remove = False
                             for removal in constraints_to_remove:
                                 if removal.startswith('feature:') and removal.split(':', 1)[1] == value:
@@ -1194,7 +1167,7 @@ class IntentClassifier:
                             if not should_remove:
                                 resolved_constraints['feature'] = value
                 elif category == 'other':
-                    # Special handling for others (merge lists)
+                    # Merge free-form "other" values instead of replacing them.
                     if 'other' in resolved_constraints:
                         existing_others = resolved_constraints['other']
                         if isinstance(existing_others, str):
@@ -1202,11 +1175,11 @@ class IntentClassifier:
                         
                         new_others = value if isinstance(value, list) else [value]
                         
-                        # Merge others, but skip those marked for removal
+                        # Preserve existing values except explicitly removed ones.
                         merged_others = existing_others.copy()
                         for other in new_others:
                             if other not in merged_others:
-                                # Check if this value should be removed
+                                # Skip a value explicitly marked for removal.
                                 should_remove = False
                                 for removal in constraints_to_remove:
                                     if removal.startswith('other:') and removal.split(':', 1)[1] == other:
@@ -1215,7 +1188,7 @@ class IntentClassifier:
                                 if not should_remove:
                                     merged_others.append(other)
                         
-                        # Set the final others value
+                        # Keep scalar output for one value and a list for several.
                         if len(merged_others) == 0:
                             if 'other' in resolved_constraints:
                                 del resolved_constraints['other']
@@ -1224,7 +1197,7 @@ class IntentClassifier:
                         else:
                             resolved_constraints['other'] = merged_others
                     else:
-                        # No existing others, just add the new ones
+                        # Add free-form values when no previous value exists.
                         if isinstance(value, list):
                             filtered_others = []
                             for other in value:
@@ -1241,7 +1214,7 @@ class IntentClassifier:
                                 else:
                                     resolved_constraints['other'] = filtered_others
                         else:
-                            # Check if this single value should be removed
+                            # Do not re-add a value explicitly removed this turn.
                             should_remove = False
                             for removal in constraints_to_remove:
                                 if removal.startswith('other:') and removal.split(':', 1)[1] == value:
@@ -1250,14 +1223,14 @@ class IntentClassifier:
                             if not should_remove:
                                 resolved_constraints['other'] = value
                 elif category == 'category':
-                    # Special handling for category - replace, don't merge
+                    # Categories represent one product type, so replace them.
                     if isinstance(value, list):
-                        # If multiple categories found, prefer the most specific one
+                        # Prefer the most specific category when several are found.
                         resolved_constraints['category'] = max(value, key=len)
                     else:
                         resolved_constraints['category'] = value
                 else:
-                    # Simply update/replace the constraint value
+                    # Scalar slots are updated with the latest value.
                     resolved_constraints[category] = value
         
         return resolved_constraints

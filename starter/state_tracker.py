@@ -27,16 +27,13 @@ RESIDUAL_STOPWORDS = {
     "need", "get", "find", "show", "like", "id", "im", "under", "over", "than",
     "less", "more", "below", "above", "between", "bucks", "dollars", "usd",
     "size", "sz", "wanting", "looking", "please", "can", "could", "a", "am",
-    # Boilerplate framing words used by prompts like "A key requirement is:",
-    # "For that, what matters is:", "I don't have an additional preference
-    # for X." -- these carry no constraint content of their own, so they
-    # shouldn't count as "residual" content that forces an LLM call.
+    # Ignore prompt boilerplate that carries no constraint content and should
+    # not trigger an unnecessary LLM call.
     "don", "dont", "doesn", "doesnt", "have", "additional", "preference",
     "preferences", "key", "requirement", "requirements", "matters", "what",
     "there", "no", "none", "any", "sure", "just", "well", "so", "also",
     "actually", "ignore", "earlier", "instead", "rather", "prefer",
-    # Slot names themselves -- "I don't have a preference for style" names
-    # the attribute being asked about, which isn't itself residual content.
+    # Slot names describe the requested attribute; they are not residual text.
     "category", "color", "material", "size", "style", "brand", "budget",
     "feature", "use_case", "other", "use", "case",
 }
@@ -52,8 +49,8 @@ PIVOT_RE = re.compile(
 
 SLOT_ENUM = sorted(ALLOWED_SLOTS)
 
-# Slots that are inherently free text. budget and size are excluded here --
-# they legitimately take numeric/short-token values ("100", "32", "10.5").
+# These slots accept descriptive text. Budget and size are excluded because
+# numeric or short-token values are valid for them.
 TEXTUAL_SLOTS = frozenset(
     {"category", "material", "color", "style", "brand", "feature", "use_case", "other"}
 )
@@ -269,7 +266,7 @@ def _remember_freeform_terms(
         ):
             session.freeform_terms.append(token)
 
-    # Bound memory; ten turns do not need an unlimited query.
+    # Keep the retrieval query bounded as the conversation grows.
     del session.freeform_terms[:-60]
 
 
@@ -308,7 +305,7 @@ def _apply_high_confidence(
                 applied.append(name)
                 continue
             else:
-                # High-confidence correction can be handled deterministically.
+                # A high-confidence conflict can be resolved locally.
                 result = dispatch(
                     session,
                     "update_slot",
@@ -413,10 +410,8 @@ def track(
     _remember_freeform_terms(session, user_message, scored)
     pending_attribute = getattr(session, "pending_attribute", None)
 
-    # Neither low-confidence extraction nor unexplained residual content =>
-    # classifier alone is sufficient, no LLM.
+    # If extraction is complete and confident, the classifier is sufficient.
     if not _needs_llm(user_message, scored):
-        #print("Not Using LLM")
         return {
             "prompt_tokens": 0,
             "completion_tokens": 0,
@@ -426,8 +421,7 @@ def track(
             "applied": applied,
         }
 
-    # Low-confidence and/or unexplained residual content: run the tool loop.
-    #print("Using LLM")
+    # Otherwise, send the unresolved content through the tool loop.
     prompt_tokens = 0
     completion_tokens = 0
     completer = create

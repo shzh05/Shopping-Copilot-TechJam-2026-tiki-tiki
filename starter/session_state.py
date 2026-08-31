@@ -62,13 +62,11 @@ class SessionState:
         self.history: list[dict[str, Any]] = []
         self.last_assistant_message: str | None = None
         self.asked: set[str] = set()
-        # The attribute most recently asked about (set by the caller after
-        # choosing the next question). Read by state_tracker.track() on the
-        # *next* turn so it knows what an ambiguous free-text reply is most
-        # likely answering, instead of guessing from phrasing alone.
+        # The caller records the last asked attribute here. On the next turn,
+        # state_tracker can use it to interpret an ambiguous free-text reply.
         self.pending_attribute: str | None = None
-        # Preserve meaningful words that the classifier did not map to a
-        # structured slot; these can still improve later catalog retrieval.
+        # Keep meaningful unmatched words so later catalog retrieval can use
+        # information that did not fit a structured slot.
         self.freeform_terms: list[str] = []
 
     def asked_attributes(self) -> set():

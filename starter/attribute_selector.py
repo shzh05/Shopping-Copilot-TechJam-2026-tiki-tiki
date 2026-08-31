@@ -78,12 +78,10 @@ SLOT_ATTRIBUTES = [
     "budget", "feature", "use_case",
 ]
 
-# --------------------------------------------------------------------------
-# Normalization of `known` (and, for size, of extracted candidate values)
-# --------------------------------------------------------------------------
+# Normalize known slot names and values before comparing them.
 
-# Alternate spellings/casings/synonyms for each slot's key. Keys here are
-# already lowercased/underscored before lookup (see _normalize_key).
+# Alternate spellings and synonyms for slot names. Keys are normalized before
+# lookup by _normalize_key.
 _KEY_SYNONYMS = {
     "category": "category", "cat": "category", "type": "category",
     "product_type": "category",
@@ -98,7 +96,7 @@ _KEY_SYNONYMS = {
     "occasion": "use_case",
 }
 
-# Every common way a size might be written, mapped onto one canonical scale.
+# Map common size spellings onto a canonical scale.
 _SIZE_NORMALIZE = {
     "xxs": "XXS", "extra extra small": "XXS",
     "xs": "XS", "extra small": "XS", "x-small": "XS", "x small": "XS",
@@ -124,7 +122,7 @@ def _normalize_size_value(raw_value: str) -> str:
     cleaned = str(raw_value).strip().lower()
     if cleaned in _SIZE_NORMALIZE:
         return _SIZE_NORMALIZE[cleaned]
-    # numeric sizes (shoes, kids, etc.) -- keep as-is, just tidy whitespace
+    # Numeric sizes (such as shoe or children's sizes) are kept as written.
     return re.sub(r"\s+", " ", cleaned).upper() if len(cleaned) <= 4 else cleaned
 
 
@@ -175,12 +173,9 @@ def normalize_known(known: dict[str, Any]) -> dict[str, str]:
     return normalized
 
 
-# --------------------------------------------------------------------------
-# Candidate-pool value extraction
-# --------------------------------------------------------------------------
+# Extract possible values for each unknown slot from the candidate pool.
 
-# `style` and `use_case` don't exist as single lists in IntentClassifier,
-# so each combines two related lists.
+# The classifier exposes style and use-case vocabulary through related lists.
 _SLOT_VOCAB: dict[str, list] = {
     "category": [_CLASSIFIER.categories],
     "material": [_CLASSIFIER.materials],
@@ -196,9 +191,7 @@ _SIZE_TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Catalog products are immutable during evaluation. Cache their flattened
-# text and extracted slot values because the same products are examined on
-# many turns while choosing clarification questions.
+# Cache flattened product text and extracted values across turns.
 _TEXT_CACHE: dict[str, str] = {}
 _VALUE_CACHE: dict[tuple[str, str], list[str]] = {}
 
@@ -207,12 +200,11 @@ def _product_key(product: dict) -> str:
     return str(product.get("parent_asin") or id(product))
 
 
-#Splits price into categories for the budget slot
-# Bucket ceilings in USD; the final bucket is open-ended ("$100+").
+# Bucket ceilings for the budget slot in USD; the final bucket is open-ended.
 _PRICE_EDGES = [15, 30, 50, 100]
 _PRICE_RE = re.compile(r"(\d+(?:\.\d+)?)")
 
-#Parses a raw price value from the catalog into a float, or None if it can't be parsed.
+# Parse a catalog price into a float when possible.
 def _parse_price(raw: Any) -> Optional[float]:
     """Best-effort float parse. Catalog prices show up as None, a float,
     or strings like 'from 21.30' or '—'."""
@@ -223,7 +215,7 @@ def _parse_price(raw: Any) -> Optional[float]:
     match = _PRICE_RE.search(str(raw))
     return float(match.group(1)) if match else None
 
-#Price buckets for the budget slot, e.g. "under $15", "under $30", etc.
+# Convert a price into the corresponding budget bucket.
 def _price_bucket(price: float) -> str:
     for edge in _PRICE_EDGES:
         if price < edge:
@@ -272,12 +264,9 @@ def _values_for_slot(slot: str, product: dict, text: str) -> list[str]:
     found: set[str] = set()
     for vocab in _SLOT_VOCAB.get(slot, []):
         for word in vocab:
-            # This function is called for many products and many turns.
-            # Plain normalized substring checks are substantially cheaper
-            # than compiling/running a regex for every catalog vocabulary
-            # entry.  Phrase vocabularies are only used as a rough proxy for
-            # choosing a question, so occasional boundary ambiguity is
-            # acceptable here; final ranking still uses the agent's matcher.
+            # Substring checks keep repeated candidate scans inexpensive.
+            # These values only guide question selection; final ranking uses
+            # the agent's more precise matcher.
             if word in text:
                 found.add(word)
     result = sorted(found)
@@ -285,9 +274,7 @@ def _values_for_slot(slot: str, product: dict, text: str) -> list[str]:
     return result
 
 
-# --------------------------------------------------------------------------
-# Scoring (Comparing unknown slots by how well they split the candidate pool)
-# --------------------------------------------------------------------------
+# Score unknown slots by how effectively they split the candidate pool.
 
 def _pick_diverse_values(counts: Counter, k: int = 4) -> list[str]:
     """
@@ -351,9 +338,8 @@ def _score_slot(slot: str, candidates: list[dict]) -> Optional[SlotSuggestion]:
     if not counts:
         return None  # nothing in the pool exposes this attribute at all
     total_votes = sum(counts.values())
-    # Note: narrowing power (expected_remaining) is still computed from the
-    # FULL value distribution, not just the values we choose to show --
-    # diversifying the displayed options never affects which attribute wins.
+    # Use the full distribution for scoring; displayed options only affect the
+    # prompt and must not change which attribute wins.
     expected_remaining = sum(c * c for c in counts.values()) / total_votes
     return SlotSuggestion(
         attribute=slot,
@@ -364,7 +350,7 @@ def _score_slot(slot: str, candidates: list[dict]) -> Optional[SlotSuggestion]:
     )
 
 
-#converts a SessionState snapshot into a `known` dict suitable for `choose_attribute`.
+# Convert a SessionState snapshot into the `known` shape used by this module.
 def known_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     """
     Adapter for SessionState.snapshot()'s exact return shape (see
@@ -382,7 +368,7 @@ def known_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         known.setdefault(name, "no preference")
     return known
 
-#returns the most useful unknown attribute
+# Return the most useful unknown attribute.
 def choose_attribute(
     known: dict[str, Any],
     candidates: list[dict],
@@ -422,12 +408,8 @@ def choose_attribute(
     qualified = [s for s in scored if s.coverage >= min_coverage]
     pool = qualified or scored
     if not pool:
-        # Nothing left worth asking: either every slot is already
-        # known/asked, or none of the remaining unknown slots have a
-        # detectable value anywhere in the candidate pool. Rather than
-        # returning None (which callers would have to special-case),
-        # fall back to a synthetic "other" suggestion so there's always
-        # something to ask about.
+        # If no measurable slot remains, return a generic prompt so callers
+        # can continue without a special case.
         return SlotSuggestion(
             attribute="other",
             top_values=[],
@@ -436,8 +418,7 @@ def choose_attribute(
             candidate_count=len(candidates),
         )
 
-    # Lower expected_remaining wins; break ties by preferring higher coverage
-    # (a question more of the pool can actually answer).
+    # Prefer stronger narrowing, then prefer attributes represented more often.
     pool.sort(key=lambda s: (s.expected_remaining, -s.coverage))
     return pool[0]
 
@@ -455,7 +436,7 @@ _PROMPT_TEMPLATES = {
     "other": "Is there anything else about what you're looking for that I should know?",
 }
 
-#returns the prompt
+# Render a natural-language prompt for the selected attribute.
 def generate_prompt(suggestion: SlotSuggestion, noun: str = "item") -> str:
     options = ", ".join(suggestion.top_values[:3])
     template = _PROMPT_TEMPLATES.get(suggestion.attribute, "Any preference for {options}?")

@@ -90,7 +90,7 @@ class Agent:
     def reset(self, session_id: str, user_profile: dict) -> None:
         self._sessions[session_id] = SessionState(session_id, user_profile)
 
-    # Function that uses bm25 to search and sort items
+    # Return product IDs ranked by weighted BM25 relevance.
     def _bm25_search(self, terms: list[str], limit: int) -> list[str]:
         unique_terms = list(dict.fromkeys(terms))[:40]
 
@@ -110,12 +110,12 @@ class Agent:
 
         return [str(row[0]) for row in rows]
 
-    # Function to add Reciprocal Rank Fusion
+    # Add one ranked result list to a Reciprocal Rank Fusion score map.
     def _add_rrf(self, scores: dict[str, float], results: list[str], weight: float = 1.0, k: int = 60) -> None:
         for rank, asin in enumerate(results, start=1):
             scores[asin] = scores.get(asin, 0.0) + (weight / (k + rank))
 
-    # Function that scores based on matches of keywords between query and product description
+    # Score the overlap between requested values and product text.
     def _match_score(self, value: object, text: str) -> float:
         if value in (None, "", []):
             return 0.0
@@ -138,14 +138,14 @@ class Agent:
     def _product_fields(self, product: dict) -> dict[str, str]:
         return self._field_cache[str(product["parent_asin"])]
 
-    # Generates score for each attribute of the product that best matches the current state
+    # Score how closely a product satisfies the session's known constraints.
     def _constraint_score(self, product: dict, session: SessionState) -> float:
         fields = self._product_fields(product)
         slots = session.slots
 
         score = 0.0
 
-        # CATEGORY
+        # Category is weighted separately for the title and category metadata.
         category = slots.get("category")
         if category:
             score += 0.02 * self._match_score(
@@ -158,7 +158,7 @@ class Agent:
                 fields["categories"],
             )
 
-        # COLOR
+        # Color can appear in any product field.
         color = slots.get("color")
         if color:
             score += 0.2 * self._match_score(
@@ -166,7 +166,7 @@ class Agent:
                 " ".join(fields.values()),
             )
 
-        # MATERIAL
+        # Material is most informative in descriptive product fields.
         material = slots.get("material")
         if material:
             score += 0.3 * self._match_score(
@@ -174,7 +174,7 @@ class Agent:
                 fields["title"] + " " + fields["features"] + " " + fields["details"] + " " + fields["description"]
             )
 
-        # BRAND
+        # Brand evidence comes primarily from the store and title.
         brand = slots.get("brand")
         if brand:
             score += 0.1 * self._match_score(
@@ -182,7 +182,7 @@ class Agent:
                 fields["store"] + " " + fields["title"],
             )
 
-        # SIZE
+        # Size is usually recorded in details or feature text.
         size = slots.get("size")
         if size:
             score += 0.05 * self._match_score(
@@ -190,7 +190,7 @@ class Agent:
                 fields["details"] + " " + fields["features"],
             )
 
-        # STYLE
+        # Style is inferred from the title, features, and details.
         style = slots.get("style")
         if style:
             score += 0.1 * self._match_score(
@@ -202,7 +202,7 @@ class Agent:
                 + fields["details"],
             )
 
-        # FEATURES
+        # Match requested features against descriptive text.
         features = slots.get("feature")
         if features:
             score += 0.2 * self._match_score(
@@ -214,7 +214,7 @@ class Agent:
                 + fields["description"],
             )
 
-        # USE CASE
+        # Use-case terms are most likely to appear in titles and descriptions.
         use_case = slots.get("use_case")
         if use_case:
             score += 0.15 * self._match_score(
@@ -228,16 +228,15 @@ class Agent:
 
         return score
 
-    # Shared ranking logic, factored out of _search so respond() can pull a
-    # larger candidate pool (for attribute_selector) without duplicating the
-    # retrieval/scoring code or running it twice.
+    # Keep retrieval and scoring in one path so recommendations and
+    # clarification selection use the same ranking.
     def _ranked_asins(self, session: SessionState, user_message: str) -> list[str]:
-        # 1. Build queries
+        # Combine state-derived terms with the current message.
         slot_terms = _terms(" ".join(session.query_terms()))
         message_terms = _terms(user_message)
         all_terms = list(dict.fromkeys(slot_terms + message_terms))[:40]
 
-        # 2. Candidate retrieval
+        # Retrieve candidates using both the combined and state-only queries.
         candidate_limit = 200
         all_results = self._bm25_search(all_terms, limit=candidate_limit)
         slot_results = (
@@ -245,12 +244,12 @@ class Agent:
             if slot_terms else []
         )
 
-        # 3. Fuse retrieval routes
+        # Give the state-only route additional influence during fusion.
         scores: dict[str, float] = {}
         self._add_rrf(scores, all_results, weight=1.0)
         self._add_rrf(scores, slot_results, weight=4)
 
-        # 4. Filter + Re-rank
+        # Apply the budget filter, then add constraint-match scores.
         budget = session.budget_limit()
         ranked = []
 
@@ -270,7 +269,7 @@ class Agent:
 
             ranked.append((final_score, asin))
 
-        # 5. Sort highest score first
+        # Return candidates from highest final score to lowest.
         ranked.sort(reverse=True)
 
         return [asin for _, asin in ranked]
@@ -283,14 +282,9 @@ class Agent:
             for asin in ranked_asins[:top_k]
         ], ranked_asins)
 
-    # Feeds the current session state (slots the user has already given)
-    # together with the top 200 candidates from _search's ranking into
-    # attribute_selector.choose_attribute to figure out the single most
-    # useful attribute to ask the user about next. Attributes already put
-    # to the user this session (session.asked) are excluded, and whatever
-    # gets chosen here is recorded into session.asked before it's returned
-    # -- so a "no preference"/ignored answer doesn't cause the same
-    # question to get re-asked turn after turn.
+    # Choose and record the next clarification attribute. Previously asked
+    # attributes are excluded so ignored or "no preference" answers do not
+    # cause the same question to be repeated.
     def _select_ask_attribute(self, session: SessionState, ranked_asins: list[str]) -> str | None:
         candidate_pool = [self._products[asin] for asin in ranked_asins[:300]]
 
@@ -314,16 +308,13 @@ class Agent:
         if session is None:
             raise RuntimeError("reset must be called before respond")
         
-        # print(user_message, turn)
         usage = track(session, user_message, turn)
 
-        # print(session.slots)
         search_results = self._search(session, user_message, top_k)
         recommendations = search_results[0]
         ask_attribute = self._select_ask_attribute(session, search_results[1])
         session.pending_attribute = ask_attribute
 
-        # print(ask_attribute)
         message = session.last_assistant_message or "Here are the closest matches I found."
         return {
             "message": message,
