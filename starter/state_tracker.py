@@ -5,7 +5,7 @@ import os
 import re
 from typing import Any, Callable
 
-from ClassifyIntent import get_shared_classifier
+from starter.ClassifyIntent import get_shared_classifier
 from starter.session_state import ALLOWED_SLOTS, LIST_SLOTS, SessionState
 from dotenv import load_dotenv
 

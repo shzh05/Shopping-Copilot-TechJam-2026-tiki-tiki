@@ -33,8 +33,14 @@ The challenge requires an `Agent` to identify a customer's hidden target product
 │   ├── agent_api_contract.json     # Machine-readable API contract
 │   ├── baseline_results.json       # Reference evaluation results
 │   └── evaluation_config.json      # Official evaluation settings
-├── agent.py                        # Shopping agent implementation
-├── local_evaluator.py              # Public-set evaluator
+├── evaluator/
+│   └── local_evaluator.py          # Public-set evaluator
+├── starter/
+│   ├── agent.py                    # Shopping agent implementation
+│   ├── ClassifyIntent.py           # Classify user intent and extract requirements
+│   ├── attribute_selector.py       # Selects ask_attribute
+│   ├── state_tracker.py            # Updates session states
+│   └── session_state.py            # Session state implementation
 ├── requirements.txt                # Python dependencies
 ├── results.json                    # Performance output metrics of agent
 └── README.md

@@ -69,7 +69,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from ClassifyIntent import get_shared_classifier
+from starter.ClassifyIntent import get_shared_classifier
 
 _CLASSIFIER = get_shared_classifier()
 
