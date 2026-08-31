@@ -1153,3 +1153,52 @@ class IntentClassifier:
                     resolved_constraints[category] = value
         
         return resolved_constraints
+
+
+# ---------------------------------------------------------------------------
+# Interactive CLI for manually testing extraction.
+#
+# Run this file directly (`python ClassifyIntent-3-2.py`) and type a query
+# at the prompt. For each input it prints:
+#   - extract_constraints()         -> the plain constraint dict
+#   - extract_constraints_scored()  -> same, but with confidence/source per value
+#   - extract_keywords()            -> leftover freeform terms not captured above
+#   - classify_with_details()       -> intent classification + constraint summary
+#
+# Type 'quit' or 'exit' (or Ctrl+D / Ctrl+C) to stop.
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    classifier = IntentClassifier()
+
+    print("IntentClassifier interactive test. Type a query and press Enter.")
+    print("Type 'quit' or 'exit' to stop.\n")
+
+    while True:
+        try:
+            user_input = input(">> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nExiting.")
+            break
+
+        if not user_input:
+            continue
+        if user_input.lower() in ("quit", "exit"):
+            break
+
+        constraints = classifier.extract_constraints(user_input)
+        scored = classifier.extract_constraints_scored(user_input)
+        keywords = classifier.extract_keywords(user_input, constraints=constraints)
+        details = classifier.classify_with_details(user_input)
+
+        print("\n--- extract_constraints() ---")
+        print(json.dumps(constraints, indent=2))
+
+        print("\n--- extract_constraints_scored() ---")
+        print(json.dumps(scored, indent=2))
+
+        print("\n--- extract_keywords() (leftover terms) ---")
+        print(json.dumps(keywords, indent=2))
+
+        print("\n--- classify_with_details() ---")
+        print(json.dumps(details, indent=2))
+        print()

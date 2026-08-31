@@ -270,13 +270,13 @@ class Agent:
 
         return [asin for _, asin in ranked]
 
-    def _search(self, session: SessionState, user_message: str, top_k: int) -> list[dict]:
+    def _search(self, session: SessionState, user_message: str, top_k: int) -> tuple[list[dict], list[str]]:
         ranked_asins = self._ranked_asins(session, user_message)
 
-        return [
+        return ([
             {"parent_asin": asin}
             for asin in ranked_asins[:top_k]
-        ]
+        ], ranked_asins)
 
     # Feeds the current session state (slots the user has already given)
     # together with the top 300 candidates from _search's ranking into
@@ -286,8 +286,7 @@ class Agent:
     # gets chosen here is recorded into session.asked before it's returned
     # -- so a "no preference"/ignored answer doesn't cause the same
     # question to get re-asked turn after turn.
-    def _select_ask_attribute(self, session: SessionState, user_message: str) -> str | None:
-        ranked_asins = self._ranked_asins(session, user_message)
+    def _select_ask_attribute(self, session: SessionState, ranked_asins: list[str]) -> str | None:
         candidate_pool = [self._products[asin] for asin in ranked_asins[:300]]
 
         known = known_from_snapshot(session.snapshot())
@@ -310,16 +309,16 @@ class Agent:
         if session is None:
             raise RuntimeError("reset must be called before respond")
         
-        print(user_message, turn)
+        # print(user_message, turn)
         usage = track(session, user_message, turn)
 
-        print(session.slots)
-
-        recommendations = self._search(session, user_message, top_k)
-        ask_attribute = self._select_ask_attribute(session, user_message)
+        # print(session.slots)
+        search_results = self._search(session, user_message, top_k)
+        recommendations = search_results[0]
+        ask_attribute = self._select_ask_attribute(session, search_results[1])
         session.pending_attribute = ask_attribute
 
-        print(ask_attribute)
+        # print(ask_attribute)
         message = session.last_assistant_message or "Here are the closest matches I found."
         return {
             "message": message,
