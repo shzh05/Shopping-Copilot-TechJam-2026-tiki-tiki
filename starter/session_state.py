@@ -69,7 +69,7 @@ class SessionState:
         # information that did not fit a structured slot.
         self.freeform_terms: list[str] = []
 
-    def asked_attributes(self) -> set():
+    def asked_attributes(self) -> set[str]:
         return self.asked
 
     def _record(self, turn: int | None, action: str, name: str, old: Any, new: Any) -> None:

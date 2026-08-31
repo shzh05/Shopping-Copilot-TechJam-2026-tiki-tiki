@@ -78,6 +78,29 @@ SLOT_ATTRIBUTES = [
     "budget", "feature", "use_case",
 ]
 
+# Dataset profile tags are broader than the structured slots exposed by the
+# agent. Keep the mapping here so profile-aware prioritization has one clear
+# normalization point. The order of preference_tags is preserved later and is
+# treated as the user's preference priority.
+_PROFILE_TAG_TO_SLOT = {
+    "category": "category",
+    "material": "material",
+    "color": "color",
+    "size": "size",
+    "fit": "style",
+    "style": "style",
+    "brand": "brand",
+    "price": "budget",
+    "budget": "budget",
+    "comfort": "feature",
+    "durability": "feature",
+    "warmth": "feature",
+    "weather": "feature",
+    "performance": "feature",
+    "occasion": "use_case",
+    "use_case": "use_case",
+}
+
 # Normalize known slot names and values before comparing them.
 
 # Alternate spellings and synonyms for slot names. Keys are normalized before
@@ -368,12 +391,33 @@ def known_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         known.setdefault(name, "no preference")
     return known
 
+
+def _profile_priority(user_profile: dict[str, Any] | None) -> list[str]:
+    """Map ordered dataset preference tags to unique selector slots."""
+    if not user_profile:
+        return []
+
+    raw_tags = user_profile.get("preference_tags", [])
+    if isinstance(raw_tags, str):
+        raw_tags = [raw_tags]
+    if not isinstance(raw_tags, (list, tuple, set)):
+        return []
+
+    priority: list[str] = []
+    for raw_tag in raw_tags:
+        tag = re.sub(r"[\s\-]+", "_", str(raw_tag).strip().lower())
+        slot = _PROFILE_TAG_TO_SLOT.get(tag)
+        if slot and slot not in priority:
+            priority.append(slot)
+    return priority
+
 # Return the most useful unknown attribute.
 def choose_attribute(
     known: dict[str, Any],
     candidates: list[dict],
     min_coverage: float = 0.15,
     asked: set[str] | None = None,
+    user_profile: dict[str, Any] | None = None,
 ) -> Optional[SlotSuggestion]:
     """
     Pick the unknown slot whose values best split `candidates`.
@@ -417,6 +461,15 @@ def choose_attribute(
             expected_remaining=float(len(candidates)),
             candidate_count=len(candidates),
         )
+
+    # Profile tags are an explicit personalization signal. Prefer the first
+    # mapped tag that is still unknown/unused and has enough candidate
+    # coverage; otherwise retain the original narrowing heuristic below.
+    qualified_by_slot = {s.attribute: s for s in qualified}
+    for preferred_slot in _profile_priority(user_profile):
+        preferred = qualified_by_slot.get(preferred_slot)
+        if preferred is not None:
+            return preferred
 
     # Prefer stronger narrowing, then prefer attributes represented more often.
     pool.sort(key=lambda s: (s.expected_remaining, -s.coverage))

@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 _CLASSIFIER = get_shared_classifier()
-HIGH_CONFIDENCE = 0.8
+HIGH_CONFIDENCE = 0.7
 AUTO_SLOTS = frozenset(
     {
         "category", "material", "color", "size", "style", "brand", "budget",
@@ -46,6 +46,12 @@ PIVOT_RE = re.compile(
     r"\b(actually looking for|switch to|something else)\b",
     re.IGNORECASE,
 )
+ATTRIBUTE_CHANGE_RE = re.compile(
+    r"\b(change|changed|changing|update|updated|replace|replaced|instead|"
+    r"ignore|forget|remove|switch|different|no longer|rather than)\b",
+    re.IGNORECASE,
+)
+MAX_SIMPLE_TOKENS = 14
 
 SLOT_ENUM = sorted(ALLOWED_SLOTS)
 
@@ -156,8 +162,15 @@ TOOLS: list[dict[str, Any]] = [
 ]
 
 SYSTEM_PROMPT = """You are a shopping slot tracker for one conversation.
-A rule-based classifier already applied high-confidence slots. You only rectify
-what the classifier could not handle. Do not invent constraints the user did not state.
+When this tool loop is called, parse the complete latest user message into
+atomic requirement components before using tools. The classifier output is
+only a hint; do not limit parsing to its low-confidence results. Do not invent
+constraints the user did not state.
+Workflow:
+1. Read the entire latest user message.
+2. Split it into each product/category, attribute, and preference component.
+3. Map every component to the best supported slot and apply all valid components.
+4. Use the user's own descriptive wording for slot values.
 Rules:
 - Do not re-set slots listed as already applied unless the user is clearly correcting them.
 - New information that does not conflict: set_slot (accumulation). Prior slots must remain.
@@ -231,14 +244,18 @@ def _low_confidence_slots(
 
 
 def _needs_llm(user_message: str, scored: dict[str, dict[str, Any]]) -> bool:
-    """The LLM is used when the classifier is low-confidence about something
-    it extracted, OR when the message still has meaningful content the
-    classifier didn't extract anything for at all (free-text answers to
-    open-ended attributes like feature/use_case/other typically fall in the
-    second bucket, since they rarely hit the vocab lists)."""
-    if _low_confidence_slots(scored):
-        return True
-    return _residual_intent(user_message, scored)
+    """Use the LLM only for long messages or explicit attribute changes.
+
+    Short, ordinary requests are handled by the classifier and their
+    unmatched words are retained as free-form retrieval terms.  ``scored``
+    remains in the signature so the routing function can be called without
+    changing the existing tracker interface.
+    """
+    del scored
+    token_count = len(TOKEN_RE.findall(user_message))
+    return token_count > MAX_SIMPLE_TOKENS or bool(
+        ATTRIBUTE_CHANGE_RE.search(user_message)
+    )
 
 
 def _remember_freeform_terms(
@@ -391,17 +408,13 @@ def track(
     model: str | None = None,
     max_rounds: int = 4,
 ) -> dict[str, int]:
-    """Classifier-first state tracking with confidence-gated LLM fallback.
+    """Classifier-first state tracking with a simple LLM complexity gate.
 
     The rule-based IntentClassifier always runs first. Any slot it extracted
     at >= HIGH_CONFIDENCE is applied locally via _apply_high_confidence --
-    no LLM call. The Groq/OpenAI tool loop is invoked when either (a) a slot
-    came back below HIGH_CONFIDENCE, or (b) the message has meaningful
-    content the classifier didn't extract anything for at all (free-text
-    answers to open-ended attributes like feature/use_case/other). In either
-    case the LLM is given just the low-confidence residual (plus what was
-    already applied, plus which attribute was most recently asked) as
-    context, not the full message re-interpreted from scratch.
+    no LLM call. For a long or explicit-change message, the complete user
+    message is sent to the LLM, which decomposes it into atomic components
+    and applies each component to the appropriate slot.
     """
 
     scored = _CLASSIFIER.extract_constraints_scored(user_message)
@@ -410,8 +423,10 @@ def track(
     _remember_freeform_terms(session, user_message, scored)
     pending_attribute = getattr(session, "pending_attribute", None)
 
-    # If extraction is complete and confident, the classifier is sufficient.
+    # Short statements without explicit change language stay local.
+    print(user_message)
     if not _needs_llm(user_message, scored):
+        print("Not Using LLM")
         return {
             "prompt_tokens": 0,
             "completion_tokens": 0,
@@ -420,8 +435,8 @@ def track(
             "low_confidence": {},
             "applied": applied,
         }
-
-    # Otherwise, send the unresolved content through the tool loop.
+    print("Using LLM")
+    # Otherwise, send the complete complex/change message through the tool loop.
     prompt_tokens = 0
     completion_tokens = 0
     completer = create
@@ -447,7 +462,7 @@ def track(
 
     chosen_model = model or os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
     snapshot = json.dumps(session.snapshot(), ensure_ascii=True)
-    classifier_json = json.dumps(low_confidence, ensure_ascii=True)
+    classifier_json = json.dumps(scored, ensure_ascii=True)
     applied_json = json.dumps(applied, ensure_ascii=True)
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -455,9 +470,11 @@ def track(
         {
             "role": "system",
             "content": (
-                f"Low-confidence classifier extraction (value/confidence/source): {classifier_json}. "
+                "Decompose the full latest user message before acting. "
+                f"Classifier hints (value/confidence/source; not complete): {classifier_json}. "
                 f"Already applied locally: {applied_json}. "
-                "Only call tools for residual or ambiguous constraints."
+                "Apply every valid component from the message, including components already hinted "
+                "by the classifier when they are not yet present in state."
             ),
         },
     ]

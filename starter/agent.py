@@ -289,7 +289,12 @@ class Agent:
         candidate_pool = [self._products[asin] for asin in ranked_asins[:300]]
 
         known = known_from_snapshot(session.snapshot())
-        suggestion = choose_attribute(known, candidate_pool, asked=session.asked)
+        suggestion = choose_attribute(
+            known,
+            candidate_pool,
+            asked=session.asked,
+            user_profile=session.user_profile,
+        )
 
         if suggestion is None:
             return None
