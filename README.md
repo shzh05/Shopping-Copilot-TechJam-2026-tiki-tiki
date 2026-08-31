@@ -1,59 +1,64 @@
 # Conversational E-Commerce Search Agent
 
-A lightweight shopping-agent implementation for the TechJam Conversational E-Commerce Search Challenge. The agent searches a frozen catalog of 50,000 clothing, shoes, and jewelry products and returns ranked product recommendations using local SQLite FTS5 full-text search with BM25 ranking.
+A lightweight shopping-agent implementation for the TechJam Conversational E-Commerce Search Challenge. The agent searches a frozen catalog of 50,000 clothing, shoes, and jewelry products and returns ranked product recommendations using local SQLite FTS5 full-text search with BM25 ranking and additional filter algorithms.
 
-The implementation is designed to run locally without an LLM, external API, vector database, or API key. This makes the baseline inexpensive, reproducible, and suitable for environments where network access may be disabled during final evaluation.
+The system runs fully locally without requiring an LLM or API key. Optionally, users can provide an LLM API key to enable enhanced intent understanding and recommendation quality, with the local pipeline retained as a reliable offline fallback.
 
 ## Project Overview
 
 The challenge requires an `Agent` to identify a customer's hidden target product within a maximum of 10 conversational turns. On each turn, the evaluator provides a session ID, an anonymized user profile, the customer's message, and the requested recommendation count. The agent returns:
 
 - A customer-facing response message
-- An optional structured clarification attribute
+- A structured clarification attribute
 - An ordered list of catalog `parent_asin` recommendations
 - Optional token-usage information
 
 ### Retrieval pipeline
 
-1. The catalog is loaded from `catalog.jsonl`.
-2. Product fields including title, categories, features, details, store, and description are indexed in an in-memory SQLite FTS5 table.
-3. The user message is tokenized, normalized to lowercase, and filtered using a small stopword list.
-4. The remaining terms are converted into an OR-based FTS5 query.
-5. SQLite BM25 ranks the matching products using field-specific weights, with the title receiving the greatest weight.
-6. The highest-ranked valid `parent_asin` values are returned to the evaluator.
-
-The current implementation is intentionally deterministic and stateless between turns. The anonymized user profile is accepted through the required interface but is not yet used for personalization.
+1. The product catalog is loaded into an in-memory SQLite FTS5 index using fields such as title, categories, features, details, store, and description.
+2. User requirements are extracted and stored in a multi-turn SessionState, allowing preferences and constraints to accumulate or be updated throughout the conversation.
+3. The current requirements are converted into a weighted FTS5 query, and BM25 retrieves and ranks relevant products.
+4. Structured constraints, such as budget and product attributes, are used to further refine the candidate results.
+5. When additional information would improve retrieval, the agent selects a relevant ask_attribute and asks the user a targeted clarification question.
+6. **LLM usage is optional.** If an API key is provided, an LLM can assist with understanding complex user requirements and intent changes. Without one, the agent falls back to the fully local rule-based pipeline and remains functional without network access.
 
 ## Repository Structure
 
 ```text
 .
-├── agent.py                  # Shopping agent implementation
-├── local_evaluator.py        # Deterministic public-set evaluator
-├── public_set.jsonl          # 200 labeled development sessions
-├── catalog.jsonl             # Frozen 50,000-product catalog
-├── evaluation_config.json    # Official evaluation settings
-├── agent_api_contract.json   # Machine-readable API contract
-├── baseline_results.json     # Reference evaluation results
+├── data/
+│   ├── public_set.jsonl            # 200 labeled development sessions
+│   └── catalog.jsonl               # Frozen 50,000-product catalog
+├── docs/
+│   ├── agent_api_contract.json     # Machine-readable API contract
+│   ├── baseline_results.json       # Reference evaluation results
+│   └── evaluation_config.json      # Official evaluation settings
+├── agent.py                        # Shopping agent implementation
+├── local_evaluator.py              # Public-set evaluator
+├── requirements.txt                # Python dependencies
+├── results.json                    # Performance output metrics of agent
 └── README.md
-```
-
-The exact filenames may be placed into the organizer's recommended folders, such as `starter/`, `data/`, and `docs/`, provided that the paths in the commands below are updated accordingly.
 
 ## Requirements
 
 - Python 3.10 or later
-- SQLite with FTS5 support, normally included with standard Python installations
-- No third-party Python packages
-- No API keys or external service credentials
+- SQLite with FTS5 support
+- `python-dotenv`
+- `openai` (optional, only required for the OpenAI-compatible/Groq LLM fallback)
 
 ## Setup and Installation
+
+Install the dependencies
+
+```bash
+pip install -r requirements.txt
+```
 
 Clone the repository and enter its directory:
 
 ```bash
-git clone <YOUR_PUBLIC_REPOSITORY_URL>
-cd <YOUR_REPOSITORY_DIRECTORY>
+git clone https://github.com/shzh05/Shopping-Copilot-TechJam-2026-tiki-tiki.git
+cd Shopping-Copilot-TechJam-2026-tiki-tiki
 ```
 
 Place the provided `catalog.jsonl` and `public_set.jsonl` files in the paths expected by the code. The default agent constructor expects:
@@ -70,103 +75,27 @@ mkdir -p data
 mv catalog.jsonl data/catalog.jsonl
 ```
 
-Verify the catalog against the organizer's published SHA256 checksum before running an evaluation.
+Verify the catalog against published SHA256 checksum before running an evaluation.
 
 ## Reproducing the Results
 
 Run the local evaluator from the repository root:
 
 ```bash
-python3 local_evaluator.py
-```
-
-If the evaluator is organized as a Python module, use the organizer-provided command instead:
-
-```bash
 python3 -m evaluator.local_evaluator
 ```
 
-The evaluator runs the agent on the 200 public sessions and reports Hit Rate@10, MRR, MTTC, Efficiency, and the combined technical score. It may also write per-session results to `results.json`.
-
-### Reference baseline
-
-The published weak BM25 baseline reports the following results on the public set:
-
-| Metric | Result |
-|---|---:|
-| Sessions | 200 |
-| Hit Rate@10 | 0.125 |
-| MRR | 0.068034 |
-| MTTC | 9.81 |
-| Efficiency | 0.119 |
-| Technical score | 0.10671 |
-
-The technical score is calculated as:
-
-```text
-0.50 × Hit Rate@10 + 0.30 × MRR + 0.20 × Efficiency
-```
-
-Only exact `parent_asin` matches count as successful recommendations.
-
-## Agent API
-
-The implementation exports the required interface:
-
-```python
-from agent import Agent
-
-agent = Agent("data/catalog.jsonl")
-agent.reset("example-session", user_profile={})
-
-response = agent.respond(
-    "example-session",
-    "I am looking for comfortable black running shoes",
-    turn=1,
-    top_k=10,
-)
-```
-
-A response has the following form:
-
-```python
-{
-    "message": "Here are the closest matches I found.",
-    "ask_attribute": None,
-    "recommendations": [
-        {"parent_asin": "B000..."}
-    ],
-    "usage": {
-        "prompt_tokens": 0,
-        "completion_tokens": 0
-    }
-}
-```
+The evaluator runs the agent on the 200 public sessions and reports Hit Rate@10, MRR, MTTC, Efficiency, and the combined technical score. It writes per-session results to `results.json`.
 
 ## Limitations and Future Improvements
 
-The current system is a strong reproducible retrieval baseline, but it does not yet implement the full potential of a conversational shopping agent.
+- **Runtime:** Evaluating many multi-turn sessions can take several minutes because each turn performs intent extraction, BM25 retrieval, reranking, and clarification analysis. We would improve speed through stronger caching, optimized SQLite queries, and a persistent pre-built search index.
 
-- It does not maintain structured requirements across turns.
-- It does not detect or explicitly handle Buying, Browsing, Boundary, or Intent Override scenarios.
-- It does not ask adaptive clarification questions; `ask_attribute` is currently `null`.
-- It does not use the anonymized user profile for personalization.
-- OR-based keyword matching can retrieve noisy results when the query is vague or uses synonyms that do not occur in the catalog.
-- It does not perform semantic/vector retrieval or a semantic reranking stage.
-- Product price and other structured constraints are not explicitly parsed or filtered.
-- Index construction occurs at startup and may require additional optimization for constrained hardware.
+- **Rule-based extraction:** The system may struggle with synonyms, misspellings, implicit preferences, negations, and complex corrections. A future version could incorporate embeddings or a stronger language-understanding component.
 
-Given more time, we would add a persistent conversation-state tracker, intent and constraint extraction, adaptive question selection, structured filtering for price/category/size/color, hybrid lexical and semantic retrieval, profile-aware reranking, and scenario-specific evaluation analysis. We would also benchmark startup time, memory usage, latency, and retrieval quality separately for each scenario.
+- **Incomplete metadata:** Some catalog products lack prices, sizes, materials, or clearly structured categories. Additional catalog cleaning and attribute normalization would improve ranking accuracy.
 
-## Model, API, Cost, and Privacy Disclosure
-
-- Model: No external LLM or trained model is required by the current implementation.
-- APIs: No external APIs are used.
-- Dependencies: Python standard library, including `sqlite3` and SQLite FTS5.
-- Network access: Not required for agent execution or local evaluation.
-- Estimated model cost: $0.
-- Reported token usage: 0 prompt tokens and 0 completion tokens per response.
-- Secrets: No API keys or credentials should be committed to this repository.
+- **In-memory session state:** Conversation state is lost when the program restarts and is not designed for distributed use. A persistent database could support longer-lived sessions.
 
 ## Dataset and Attribution
 
@@ -174,8 +103,12 @@ The frozen catalog and public sessions are derived from the Amazon Reviews 2023 
 
 ## Team Member Contributions
 
-<!-- Add team member names and contributions here. -->
+- **Han Zhi Heng, Shawn** — Implemented the product search and filtering pipeline, including BM25 retrieval, RRF ranking, and constraint-based reranking.
 
-## License
+- **Ouh Zirui** — Implemented the optional LLM integration and intent override functionality for updating or replacing user requirements.
 
-Add the license applicable to your submitted code and competition data here before making the repository public.
+- **Leong Qi An** — Implemented user requirement extraction and classification.
+
+- **Zhong Chengjie** — Developed the attribute-selection component for identifying the most useful `ask_attribute` to request from the user.
+
+- **Tan Jun Yu Henry** — Analysed the dataset and provided insights that guided the project’s design and development; fine-tuned retrieval weights and produced the demonstration video.
