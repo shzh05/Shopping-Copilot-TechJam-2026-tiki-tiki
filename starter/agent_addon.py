@@ -94,7 +94,7 @@ class Agent:
         SELECT parent_asin
         FROM products
         WHERE products MATCH ?
-        ORDER BY bm25(products, 0.0, 6.0, 4.0, 2.5, 2.5, 1.5, 1.0) LIMIT ?
+        ORDER BY bm25(products, 0.0, 5.0, 200.0, 20.5, 2.5, 2.5, 9.0) LIMIT ?
         """,
         (expression, limit)
         ).fetchall()
@@ -146,7 +146,7 @@ class Agent:
         # CATEGORY
         category = slots.get("category")
         if category:
-            score += 0.15 * self._match_score(
+            score += 0.02 * self._match_score(
                 category,
                 fields["title"],
             )
@@ -159,7 +159,7 @@ class Agent:
         # COLOR
         color = slots.get("color")
         if color:
-            score += 0.05 * self._match_score(
+            score += 0.2 * self._match_score(
                 color,
                 " ".join(fields.values()),
             )
@@ -167,7 +167,7 @@ class Agent:
         # MATERIAL
         material = slots.get("material")
         if material:
-            score += 0.1 * self._match_score(
+            score += 0.3 * self._match_score(
                 material,
                 fields["title"] + " " + fields["features"] + " " + fields["details"] + " " + fields["description"]
             )
@@ -191,7 +191,7 @@ class Agent:
         # STYLE
         style = slots.get("style")
         if style:
-            score += 0.05 * self._match_score(
+            score += 0.1 * self._match_score(
                 style,
                 fields["title"]
                 + " "
@@ -203,7 +203,7 @@ class Agent:
         # FEATURES
         features = slots.get("feature")
         if features:
-            score += 0.05 * self._match_score(
+            score += 0.2 * self._match_score(
                 features,
                 fields["features"]
                 + " "
@@ -215,7 +215,7 @@ class Agent:
         # USE CASE
         use_case = slots.get("use_case")
         if use_case:
-            score += 0.05 * self._match_score(
+            score += 0.15 * self._match_score(
                 use_case,
                 fields["title"]
                 + " "
@@ -243,7 +243,7 @@ class Agent:
         # 3. Fuse retrieval routes
         scores: dict[str, float] = {}
         self._add_rrf(scores, all_results, weight=1.0)
-        self._add_rrf(scores, slot_results, weight=1.3) # Fine tune the weight
+        self._add_rrf(scores, slot_results, weight=4) # Fine tune the weight
 
         # 4. Filter + Re-rank
         budget = session.budget_limit()
@@ -261,7 +261,7 @@ class Agent:
                 continue
 
             constraint_score = self._constraint_score(product, session)
-            final_score = 20.0 * retrieval_score + constraint_score # Fine tune the 20.0
+            final_score = 5.0 * retrieval_score + constraint_score # Fine tune the 20.0
 
             ranked.append((final_score, asin))
 
