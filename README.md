@@ -38,6 +38,7 @@ The challenge requires an `Agent` to identify a customer's hidden target product
 ├── requirements.txt                # Python dependencies
 ├── results.json                    # Performance output metrics of agent
 └── README.md
+```
 
 ## Requirements
 
