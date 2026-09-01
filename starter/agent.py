@@ -286,7 +286,7 @@ class Agent:
     # attributes are excluded so ignored or "no preference" answers do not
     # cause the same question to be repeated.
     def _select_ask_attribute(self, session: SessionState, ranked_asins: list[str]) -> str | None:
-        candidate_pool = [self._products[asin] for asin in ranked_asins[:300]]
+        candidate_pool = [self._products[asin] for asin in ranked_asins[:200]]
 
         known = known_from_snapshot(session.snapshot())
         suggestion = choose_attribute(
