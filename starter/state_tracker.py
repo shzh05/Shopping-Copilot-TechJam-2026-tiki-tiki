@@ -424,9 +424,9 @@ def track(
     pending_attribute = getattr(session, "pending_attribute", None)
 
     # Short statements without explicit change language stay local.
-    print(user_message)
+    # print(user_message)
     if not _needs_llm(user_message, scored):
-        print("Not Using LLM")
+        # print("Not Using LLM")
         return {
             "prompt_tokens": 0,
             "completion_tokens": 0,
@@ -435,7 +435,7 @@ def track(
             "low_confidence": {},
             "applied": applied,
         }
-    print("Using LLM")
+    # print("Using LLM")
     # Otherwise, send the complete complex/change message through the tool loop.
     prompt_tokens = 0
     completion_tokens = 0
