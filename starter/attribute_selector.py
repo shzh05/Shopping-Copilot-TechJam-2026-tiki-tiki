@@ -1,65 +1,27 @@
 """
-Things to adjust:
+Room for improvement
+--------------------
 Attribute definitions; what should be classified under style, use-case, feature, etc.?
 
 Price bucketing; what thresholds for budget?
 
-(Handwritten by me)
-Proactive Guidance: pick the single most useful unknown attribute to ask
-about, given what we already know and the current candidate pool.
 
-Fits into pillar II of the challenge ("Trigger an immediate retrieval
-cutoff when facing Over-Generality ... to actively generate structured,
-proactive clarification prompts that guide user convergence").
-
---------------------------------------------------------------------------
 Inputs
+------
+known attributes:   dict of slot -> value for attributes already pinned down.
+                    Keys and values are NOT assumed to be pre-normalized -- they
+                    may come from upstream extraction/UI code with inconsistent
+                    casing or phrasing, e.g. {"Color": "blue", "Size": "Large"}
+                    instead of {"color": "blue", "size": "L"}. `normalize_known`
+                    (called automatically by `choose_attribute`) handles this.
+candidates:         up to ~300 catalog product dicts (ideally the pool that
+                    already satisfies `known`, e.g. output of the retrieval
+                    stage; the selection logic itself works on any list of
+                    product dicts).
+
+Output
 --------------------------------------------------------------------------
-known:      dict of slot -> value for attributes already pinned down.
-            Keys and values are NOT assumed to be pre-normalized -- they
-            may come from upstream extraction/UI code with inconsistent
-            casing or phrasing, e.g. {"Color": "blue", "Size": "Large"}
-            instead of {"color": "blue", "size": "L"}. `normalize_known`
-            (called automatically by `choose_attribute`) handles this.
-candidates: up to ~300 catalog product dicts (ideally the pool that
-            already satisfies `known`, e.g. output of the retrieval
-            stage; the selection logic itself works on any list of
-            product dicts).
-
-Slots handled (must match agent_api_contract.json's ask_attribute enum,
-minus "other"):
-    category, material, color, size, style, brand, budget, feature, use_case
-
---------------------------------------------------------------------------
-Approach
---------------------------------------------------------------------------
-1. Normalize `known`'s keys (case/spelling variants -> canonical slot
-   names) and values (lowercased; sizes mapped onto a single S/M/L/XL...
-   scale) so a slot that's already pinned down isn't mistaken for unknown.
-2. For every remaining unknown slot, scan each candidate's text (title,
-   features, description, categories, details, store) and pull out every
-   value that slot could take, reusing ClassifyIntent.IntentClassifier's
-   vocab so extraction stays consistent with the rest of the pipeline.
-   `budget` is handled separately via numeric price bucketing; `size` via
-   a regex over common size tokens, normalized the same way as `known`.
-3. For each slot, build a histogram of values across the pool and score it
-   by the *expected number of candidates left* if we ask the question and
-   the user's answer lands on one of the observed values with probability
-   proportional to how common that value already is in the pool:
-
-        E[remaining] = sum(count_v ** 2) / total_votes
-
-   This is minimized by splits that are both even (no single dominant
-   value) and fine-grained (many distinct values) -- exactly the property
-   we want from a clarifying question. Slots where almost nothing in the
-   pool exposes a value (low `coverage`) are penalized/skipped, since
-   asking about them is likely to produce "no preference" dead ends.
-4. The slot with the lowest expected remaining count wins. We surface its
-   most common concrete values (up to 3) in a natural-language question.
-
-This is a heuristic, not true expected information gain over the *true*
-hidden user preference -- we don't know that distribution, so we use the
-pool's own distribution as the best available proxy.
+Attribute:          Provide agent with attribute that results in maximum information gain
 """
 
 from __future__ import annotations
@@ -132,6 +94,10 @@ _SIZE_NORMALIZE = {
 }
 
 
+#Normalization and cleaning process (below) was made under assumption that sessionState data is messy
+#Certain processes are not necessary
+
+# Normalize raw key into canonical slot name.
 def _normalize_key(raw_key: str) -> Optional[str]:
     cleaned = re.sub(r"[\s\-]+", "_", raw_key.strip().lower())
     if cleaned in _KEY_SYNONYMS:
@@ -141,6 +107,7 @@ def _normalize_key(raw_key: str) -> Optional[str]:
     return None  # unrecognized attribute name; caller ignores rather than guesses
 
 
+# Normalize raw size string value.
 def _normalize_size_value(raw_value: str) -> str:
     cleaned = str(raw_value).strip().lower()
     if cleaned in _SIZE_NORMALIZE:
@@ -149,26 +116,13 @@ def _normalize_size_value(raw_value: str) -> str:
     return re.sub(r"\s+", " ", cleaned).upper() if len(cleaned) <= 4 else cleaned
 
 
+# Normalize keys and values in the known dict.
 def normalize_known(known: dict[str, Any]) -> dict[str, str]:
     """
     Map a possibly messy `known` dict (inconsistent key casing/spelling,
     unnormalized values like "Large" vs "L" vs "large") onto canonical
     slot names with normalized values. Unrecognized keys and empty
     values are dropped.
-
-    Compatible with SessionState.slots (session_state.py) as-is:
-    - Falsy values (None, "", [], 0) are treated as "not yet known",
-      matching SCALAR_SLOTS defaulting to None and LIST_SLOTS
-      defaulting to [] there.
-    - List-valued slots (feature/use_case/other) are joined into a
-      readable comma-separated string rather than stringified as a
-      raw Python list.
-    - A numeric budget (SessionState coerces budget to an int max
-      price) is rendered as "$<amount>".
-    - The "other" slot isn't one of the 9 attributes this module can
-      ask about or extract from the catalog, so it's accepted as a
-      known-slot signal (a non-empty "other" won't be mistaken for
-      unknown) but never becomes something `choose_attribute` suggests.
     """
     normalized: dict[str, str] = {}
     for raw_key, raw_value in known.items():
@@ -219,6 +173,7 @@ _TEXT_CACHE: dict[str, str] = {}
 _VALUE_CACHE: dict[tuple[str, str], list[str]] = {}
 
 
+# Return candidate product lookup key.
 def _product_key(product: dict) -> str:
     return str(product.get("parent_asin") or id(product))
 
@@ -246,6 +201,7 @@ def _price_bucket(price: float) -> str:
     return f"${_PRICE_EDGES[-1]}+"
 
 
+# Flatten product fields into a lowercase string.
 def _product_text(product: dict) -> str:
     """Flatten a catalog product's text fields into one lowercase blob."""
     key = _product_key(product)
@@ -267,6 +223,7 @@ def _product_text(product: dict) -> str:
     _TEXT_CACHE[key] = result
     return result
 
+# Extract values exposed by a product for a given slot.
 def _values_for_slot(slot: str, product: dict, text: str) -> list[str]:
     """Every distinct (normalized) value this product exposes for `slot`."""
     key = (_product_key(product), slot)
@@ -299,21 +256,10 @@ def _values_for_slot(slot: str, product: dict, text: str) -> list[str]:
 
 # Score unknown slots by how effectively they split the candidate pool.
 
+# Pick diverse values from value counts to show in prompt.
 def _pick_diverse_values(counts: Counter, k: int = 4) -> list[str]:
     """
     Choose up to `k` values to surface in the clarification prompt.
-
-    Pure `most_common(k)` tends to hand back near-duplicates of the
-    catalog's own dominant values (e.g. "solid, printed, floral" might
-    all be minority patterns dwarfed by "solid"), which quietly steers
-    the user toward whatever's already common rather than letting them
-    say what they actually want. To reduce that anchoring effect, we
-    always keep the single most common value (it's the most likely
-    match, so it's still useful to show), then spread the remaining
-    slots evenly across the *rest* of the distribution -- including
-    less-common values -- rather than taking the next-most-common ones
-    in a row. This is deterministic (no randomness) but surfaces more
-    of the real variety present in the pool.
     """
     ranked = [v for v, _ in counts.most_common()]
     if len(ranked) <= k:
@@ -346,6 +292,7 @@ class SlotSuggestion:
     candidate_count: int
 
 
+# Compute split score and return SlotSuggestion for a slot.
 def _score_slot(slot: str, candidates: list[dict]) -> Optional[SlotSuggestion]:
     n = len(candidates)
     if n == 0:
@@ -379,12 +326,6 @@ def known_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     Adapter for SessionState.snapshot()'s exact return shape (see
     session_state.py):
         {"slots": {...currently filled slots...}, "unspecified": [...]}
-
-    `unspecified` entries (the user explicitly said "no preference") are
-    folded into the returned dict as known too, so `choose_attribute`
-    doesn't mistake "asked and declined" for "never asked" and suggest
-    asking about it again. `normalize_known` handles the rest (casing,
-    list-slot joining, numeric budget, etc.) once this is passed in.
     """
     known = dict(snapshot.get("slots") or {})
     for name in snapshot.get("unspecified") or []:
@@ -392,6 +333,7 @@ def known_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     return known
 
 
+# Extract priority slots based on user profile preference tags.
 def _profile_priority(user_profile: dict[str, Any] | None) -> list[str]:
     """Map ordered dataset preference tags to unique selector slots."""
     if not user_profile:
@@ -422,20 +364,7 @@ def choose_attribute(
     """
     Pick the unknown slot whose values best split `candidates`.
 
-    `known` may use inconsistent key casing/spelling and unnormalized
-    values (e.g. {"Color": "blue", "Size": "Large"}); it is normalized
-    internally via `normalize_known` before anything is compared.
-    Slots where fewer than `min_coverage` of candidates expose a value are
-    deprioritized (but used as a fallback if nothing else qualifies, so we
-    still ask *something* rather than nothing).
-
-    `asked`: attributes already put to the user this session (see
-    SessionState.asked). These are excluded from consideration even if
-    `known` doesn't (yet) reflect an answer or an explicit "no preference"
-    -- e.g. the user ignored the question, or answered ambiguously and
-    nothing landed in `slots`/`unspecified`. Without this, the same
-    question could get re-asked turn after turn since, from `known`'s
-    point of view alone, the slot still looks untouched.
+    `asked`: used to check if attribute has been asked
 
     Returns a synthetic attribute="other" SlotSuggestion (never None) when
     every slot is already known/asked, or when none of the remaining
@@ -496,6 +425,7 @@ def generate_prompt(suggestion: SlotSuggestion, noun: str = "item") -> str:
     return template.format(options=options, noun=noun)
 
 
+# Generate top-level proactive guidance payload.
 def propose_clarification(
     known: dict[str, Any],
     candidates: list[dict],
